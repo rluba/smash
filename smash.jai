@@ -31,7 +31,29 @@ main :: () {
     }
 
     print("Target process launched!\n");
-    ptrace(.CONT, pid, null, null);
+
+    regs: User_Regs = ---;
+    result := ptrace(.GETREGS, pid, null, *regs);
+    if result != 0 {
+        log_error("Could not get registers. .GETREGS failed with errno %\n", errno());
+        exit(-1);
+    }
+    print("Registers: %\n", regs);
+
+    fpregs: User_Fpregs = ---;
+    result = ptrace(.GETFPREGS, pid, null, *fpregs);
+    if result != 0 {
+        log_error("Could not get FP registers. .GETFPREGS failed with errno %\n", errno());
+        exit(-1);
+    }
+    print("FP Registers: %\n", fpregs);
+
+    // set_breakpoint(.{0x
+    result = ptrace(.CONT, pid, null, null);
+    if result != 0 {
+        log_error("Could not continue. .CONT failed with errno %\n", errno());
+        exit(-1);
+    }
 
     timeout_ms := 0;
 
@@ -121,8 +143,8 @@ main :: () {
 
     // Reap the zombie child process
     status: s32 = ---;
-    result := waitpid(pid, *status, 0);
-    if result == -1 {
+    wait_result := waitpid(pid, *status, 0);
+    if wait_result == -1 {
         log_error("Couldn’t reap child process: %\n", errno());
         exit(1);
     }
@@ -189,9 +211,12 @@ spawn_target_process :: (cmd: [] string, working_directory: string) -> success: 
         // the list must be null terminated
         array_add(*c_cmd, null);
 
-        ptrace(.TRACEME, 0, null, null);
-        
+        ptrace_result := ptrace(.TRACEME, 0, null, null);
+        if ptrace_result == 0 {
         execvp(c_cmd[0], c_cmd.data);
+        } else {
+            log_error("Could not start tracing. TRACEME failed with errno %\n", errno());
+        }
 
         error := errno();
         write(process_status_pipes[1], *error, size_of(type_of(error)));
