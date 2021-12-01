@@ -31,14 +31,21 @@ main :: () {
 
     target_args := extra_args;
     if !target_args {
-        log_error("Hey man! You should tell us what to run!!\n");
+        log_error("Usage: % [-work_dir <dir>] [-breakpoint <address>] [--] <program to run + args>", get_command_line_arguments()[0]);
         exit(1);
     }
+
+    target_program_path := target_args[0];
+    success := read_target_program(target_program_path);
+    if !success {
+        log_error("Could not read target program\n");
+        exit(1);
+    }
+
     command := join(.. target_args, separator = " ");
     defer free(command);
     print("Launching %\n", command);
 
-    success: bool;
     target: Target_State;
     success, target.pid, target.output_pipe, target.error_pipe = spawn_target_process(target_args, args.work_dir);
     if !success {
@@ -492,3 +499,4 @@ formatHex64 :: #bake_arguments formatInt(base = 16, minimum_digits = 16);
 #import "String";
 
 #load "ptrace.jai";
+#load "elf.jai";
