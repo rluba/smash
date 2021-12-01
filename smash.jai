@@ -19,51 +19,47 @@ main :: () {
     defer free(command);
     print("Launching %\n", command);
 
-    success, pid, output_pipe, error_pipe := spawn_target_process(target_args, args.work_dir);
+    success: bool;
+    target: Target_State = ---;
+    success, target.pid, target.output_pipe, target.error_pipe = spawn_target_process(target_args, args.work_dir);
     if !success {
         log_error("Failed to spawn target process!\n");
         exit(-1);
     }
 
     defer {
-        close(output_pipe);
-        close(error_pipe);
+        close(target.output_pipe);
+        close(target.error_pipe);
     }
 
-    print("Target process launched!\n");
+    print("Target process launched (pid %)!\n", target.pid);
 
-    regs: User_Regs = ---;
-    result := ptrace(.GETREGS, pid, null, *regs);
-    if result != 0 {
-        log_error("Could not get registers. .GETREGS failed with errno %\n", errno());
-        exit(-1);
-    }
-    print("Registers: %\n", regs);
-
-    fpregs: User_Fpregs = ---;
-    result = ptrace(.GETFPREGS, pid, null, *fpregs);
-    if result != 0 {
-        log_error("Could not get FP registers. .GETFPREGS failed with errno %\n", errno());
-        exit(-1);
-    }
-    print("FP Registers: %\n", fpregs);
-
-    // set_breakpoint(.{0x
-    result = ptrace(.CONT, pid, null, null);
+    print_registers(*target);
+    result := ptrace(.SINGLESTEP, target.pid, null, null);
     if result != 0 {
         log_error("Could not continue. .CONT failed with errno %\n", errno());
         exit(-1);
     }
 
-    timeout_ms := 0;
+    fcntl(target.output_pipe, F_SETFL, fcntl(target.output_pipe, F_GETFL) | O_NONBLOCK);
+    fcntl(target.error\_pipe, F_SETFL, fcntl(target.error\_pipe, F_GETFL) | O_NONBLOCK);
+
 
     poll_fds: [3] pollfd;
-    poll_fds[0].fd = output_pipe;
+    poll_fds[0].fd = target.output_pipe;
     poll_fds[0].events = POLLIN;
-    poll_fds[1].fd = error_pipe;
+    poll_fds[1].fd = target.error_pipe;
     poll_fds[1].events = POLLIN;
     num_fds: u32 = 2;
 
+    // Using a timer for this SUCKS because it introduces a fixed delay to everything the debugger does.
+    // But there’s no clean way of waiting for child events like waitpid does, but with using poll().
+    // Linux 5.3 introduced "pidfd_open" that _should_ solve that issue.
+    // But that’s not available on Ubuntu 18.04 (kernel’s too old).
+    // So we will have to create a separate thread that does the waitpid stuff and signals the main thread
+    // or whatever. Sigh.
+    //      - rluba 2021-12-01
+    timeout_ms := 10;
     timer_fd: s32 = -1;
     defer {
         if timer_fd != -1 {
@@ -71,13 +67,12 @@ main :: () {
         }
     }
 
-    timeout_reached := false;
     if timeout_ms {
         timer_fd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK);
         if timer_fd == -1 {
             log_error("Couldn’t create timer fd: %\n", errno());
-            try_kill_and_reap(pid);
-            exit(-1);
+            try_kill_and_reap(target.pid);
+            exit(1);
         }
 
         poll_fds[num_fds].fd = timer_fd;
@@ -88,39 +83,34 @@ main :: () {
         timeout_spec.tv_sec = timeout_ms / 1000;
         timeout_spec.tv_nsec = (timeout_ms % 1000) * 1000 * 1000;
         timer_spec: itimerspec;
-        timer_spec.it_value = timeout_spec;
+        timer_spec.it_interval = timeout_spec; // Recurring timeout
+        timer_spec.it_value = timeout_spec;    // first-time timeout
         result := timerfd_settime(timer_fd, 0, *timer_spec, null);
         if (result == -1) {
             log_error("Couldn’t set timer: %\n", errno());
-            try_kill_and_reap(pid);
-            exit(-1);
+            try_kill_and_reap(target.pid);
+            exit(1);
         }
     }
 
-    fcntl(output_pipe, F_SETFL, fcntl(output_pipe, F_GETFL) | O_NONBLOCK);
-    fcntl(error\_pipe, F_SETFL, fcntl(error\_pipe, F_GETFL) | O_NONBLOCK);
-
-    output_builder: String_Builder;
-    error_builder : String_Builder;
-    defer {
-        free_buffers(*output_builder);
-        free_buffers(*error_builder);
-    }
-
-    done_output: bool;
-    done_error: bool;
+    exit_code: s32;
     while true {
         num_events := poll(poll_fds.data, num_fds, -1);
-        // @Speed: Only read from the pipe we got a POLLIN signal from?
-        success := read_entire_pipe(output_pipe, *output_builder, true);
-        success &&= read_entire_pipe(error\_pipe, *error_builder, true);
+        success := true;
+        if poll_fds[0].revents & POLLIN {
+            success = print_entire_pipe(target.output_pipe);
+        }
+        if poll_fds[1].revents & POLLIN {
+            success = print_entire_pipe(target.error_pipe) && success;
+        }
         if !success {
-            log_error("Couldn’t read output\n");
-            break;
+            log_error("Couldn’t read output of target\n");
+            try_kill_and_reap(target.pid);
+            exit(1);
         }
 
-        if poll_fds[0].revents & POLLHUP    done_output = true;
-        if poll_fds[1].revents & POLLHUP    done_error = true;
+        if poll_fds[0].revents & POLLHUP    target.done_output = true;
+        if poll_fds[1].revents & POLLHUP    target.done_error = true;
 
         if timeout_ms && poll_fds[2].revents & POLLIN {
             num_exp: u64;
@@ -129,47 +119,118 @@ main :: () {
                 log_error("Couldn’t read timer: % (read %)\n", errno(), size_read);
             }
 
-            // We’ve hit a timeout! Time to kill the child. (will be reaped below)
-            timeout_reached = true;
-            result := kill(pid, SIGKILL);
-            if result == -1 {
-                log_error("Couldn’t kill child %: %\n", pid, errno());
-            }
-            break;
         }
 
-        if done_output && done_error    break;
+        status: s32 = ---;
+        wait_result := waitpid(target.pid, *status, WNOHANG);
+        if wait_result == -1 {
+            log_error("Couldn’t wait for target process: %\n", errno());
+            try_kill_and_reap(target.pid);
+            exit(1);
+        }
+        if wait_result == 0 {
+            print("Nothing has happened yet, continuing…\n");
+            continue;
+        }
+
+        print("Something has happened in the target process!\n");
+        if WIFSTOPPED(status) && WSTOPSIG(status) == SIGTRAP {
+            print_registers(*target);
+
+            result = ptrace(.CONT, target.pid, null, null);
+            if result != 0 {
+                log_error("Could not continue. .CONT failed with errno %\n", errno());
+                try_kill_and_reap(target.pid);
+                exit(-1);
+            }
+        } else {
+            if WIFEXITED(status) {
+                exit_code = cast(s32) WEXITSTATUS(status);
+                print("Target has exited with code %\n", exit_code);
+                break;
+            }
+            if WIFSIGNALED(status) {
+                signal := WTERMSIG(status);
+                signal_string := to_string(strsignal(signal));
+                log_error("Target was terminated by signal % (%).\n", signal, signal_string);
+                break;
+            }
+            log_error("Something unexpected happened in the target process: %\n", status);
+            try_kill_and_reap(target.pid);
+            exit(-1);
+        }
     }
 
-    // Reap the zombie child process
-    status: s32 = ---;
-    wait_result := waitpid(pid, *status, 0);
-    if wait_result == -1 {
-        log_error("Couldn’t reap child process: %\n", errno());
-        exit(1);
+    print("BYEEEEE\n");
+}
+
+Target_State :: struct {
+    pid: pid_t;
+    output_pipe: s32;
+    error_pipe: s32;
+    done_output: bool;
+    done_error: bool;
+}
+
+read_entire_pipe :: (fd: s32, builder: *String_Builder, print_result: bool) -> success: bool {
+    buffer: [2048] u8;
+    while true {
+        bytes_read := read(fd, buffer.data, buffer.count-1);
+        if bytes_read == 0  return true;
+        if bytes_read < 0 {
+            read_error := errno();
+            if read_error == EAGAIN || read_error == EWOULDBLOCK {
+                // @Incomplete: Also ignore EINTR?
+                break;
+            }
+            return false;
+        }
+
+        append(builder, buffer.data, bytes_read);
+        if print_result {
+            buffer_str := to_string(buffer.data, bytes_read);
+            print("%", buffer_str);
+        }
     }
 
-    output_string := builder_to_string(*output_builder);
-    error_string  := builder_to_string(*error_builder);
+    return true;
+}
 
-    exit_code: u32;
-    if WIFEXITED(status) {
-        exit_code = cast(u32) WEXITSTATUS(status);
-    } else {
-        log_error("Unexpected child status after reaping: %\n", status);
-        // Set an exit_code here so that on a successful launch, user code
-        // doesnt assume the child process exited normally.
-        exit_code = 1;
-    }
-    if timeout_reached exit_code = 1;
 
-    if WIFSIGNALED(status) {
-        signal := WTERMSIG(status);
-        signal_string := to_string(strsignal(signal));
-        log_error("Command was terminated by signal % (%).\n", signal, signal_string);
+print_target_output :: (using target: *Target_State) -> success: bool {
+    success := print_entire_pipe(output_pipe);
+    success &&= print_entire_pipe(error_pipe);
+    if !success {
+        log_error("Couldn’t read output\n");
+        return false;
     }
-    
-    print("Full output was:\n%\n\nFull error output was:\n%\n", output_string, error_string);
+
+    return true;
+}
+
+print_registers :: (using target: *Target_State) -> success: bool{
+    regs: User_Regs = ---;
+    result := ptrace(.GETREGS, pid, null, *regs);
+    if result != 0 {
+        log_error("Could not get registers. .GETREGS failed with errno %\n", errno());
+        return false;
+    }
+    print("Registers: %\n", regs);
+
+    fpregs: User_Fpregs = ---;
+    result = ptrace(.GETFPREGS, pid, null, *fpregs);
+    if result != 0 {
+        log_error("Could not get FP registers. .GETFPREGS failed with errno %\n", errno());
+        return false;
+    }
+    print("FP Registers: %\n", fpregs);
+
+    return true;
+}
+
+Breakpoint :: struct {
+    address: u64;
+    original_instruction_word: s64;
 }
 
 spawn_target_process :: (cmd: [] string, working_directory: string) -> success: bool, pid: pid_t, output_pipe: s32, error_pipe: s32 {
@@ -213,7 +274,7 @@ spawn_target_process :: (cmd: [] string, working_directory: string) -> success: 
 
         ptrace_result := ptrace(.TRACEME, 0, null, null);
         if ptrace_result == 0 {
-        execvp(c_cmd[0], c_cmd.data);
+            execvp(c_cmd[0], c_cmd.data);
         } else {
             log_error("Could not start tracing. TRACEME failed with errno %\n", errno());
         }
@@ -277,7 +338,7 @@ spawn_target_process :: (cmd: [] string, working_directory: string) -> success: 
     }
 }
 
-read_entire_pipe :: (fd: s32, builder: *String_Builder, print_result: bool) -> success: bool {
+print_entire_pipe :: (fd: s32) -> success: bool {
     buffer: [2048] u8;
     while true {
         bytes_read := read(fd, buffer.data, buffer.count-1);
@@ -291,11 +352,8 @@ read_entire_pipe :: (fd: s32, builder: *String_Builder, print_result: bool) -> s
             return false;
         }
 
-        append(builder, buffer.data, bytes_read);
-        if print_result {
-            buffer_str := to_string(buffer.data, bytes_read);
-            print("%", buffer_str);
-        }
+        buffer_str := to_string(buffer.data, bytes_read);
+        print("%", buffer_str);
     }
 
     return true;
