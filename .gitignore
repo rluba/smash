@@ -14,3 +14,5 @@
 *.vcxproj.user
 /.vscode
 .DS_Store
+/smash
+/tracee

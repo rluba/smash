@@ -171,19 +171,29 @@ read_target_program :: (path: string) -> success: bool {
     section_names.data = file_content.data + names_section_header.offset;
     section_names.count = cast (s64) names_section_header.size;
 
+    debug_line_section: *Elf_Section_Header;
     for 0..header.num_section_headers - 1 {
-        section_header := cast (*Elf_Section_Header) (file_content.data + header.section_header_offset + it * header.section_header_entry_size);
-        print("Section header %: %\n", it, <<section_header);
-        if !validate_section_header(section_header, file_content.count)     return false;
-        if section_header.name_offset > section_names.count {
-            print("Invalid section name offset: %\n", section_header.name_offset);
+        section := cast (*Elf_Section_Header) (file_content.data + header.section_header_offset + it * header.section_header_entry_size);
+        print("Section header %: %\n", it, <<section);
+        if !validate_section_header(section, file_content.count)     return false;
+        if section.name_offset > section_names.count {
+            print("Invalid section name offset: %\n", section.name_offset);
             return false;
         }
 
         // @Stability: this doesn’t check for overflows!
-        section_name := to_string(section_names.data + section_header.name_offset);
+        section_name := to_string(section_names.data + section.name_offset);
         print("Section name: %\n", section_name);
+        if section_name == ".debug_line" {
+            if debug_line_section {
+                log_error("Found another debug line section at %\n", it);
+                return false;
+            }
+            debug_line_section = section;
+        }
     }
+
+    print("Debug line section: %\n", << debug_line_section);
 
     return true;
 }
