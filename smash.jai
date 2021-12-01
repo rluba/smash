@@ -1,6 +1,7 @@
 
 Args :: struct {
     work_dir: string;
+    breakpoint: string;
 }
 
 main :: () {
@@ -8,6 +9,24 @@ main :: () {
     if !args_success {
         log_error("Could not parse arguments\n");
         exit(1);
+    }
+
+    address: u64;
+    if is_set.breakpoint {
+        result: int;
+        success: bool = ---;
+        remainder: string = ---;
+        if begins_with(args.breakpoint, "0x") {
+            hex_str := slice(args.breakpoint, 2, args.breakpoint.count - 2);
+            result, success, remainder = string_to_int(hex_str, 16);
+        } else {
+            result, success, remainder = string_to_int(args.breakpoint, 10);
+        }
+        if !success || remainder {
+            print("Could not parse breakpoint address\n");
+            exit(1);
+        }
+        address = cast(u64) result;
     }
 
     target_args := extra_args;
@@ -20,7 +39,7 @@ main :: () {
     print("Launching %\n", command);
 
     success: bool;
-    target: Target_State = ---;
+    target: Target_State;
     success, target.pid, target.output_pipe, target.error_pipe = spawn_target_process(target_args, args.work_dir);
     if !success {
         log_error("Failed to spawn target process!\n");
@@ -33,9 +52,12 @@ main :: () {
     }
 
     print("Target process launched (pid %)!\n", target.pid);
+    
+    if address {
+        add_breakpoint(*target, address);
+    }
 
-    print_registers(*target);
-    result := ptrace(.SINGLESTEP, target.pid, null, null);
+    result := ptrace(.CONT, target.pid, null, null);
     if result != 0 {
         log_error("Could not continue. .CONT failed with errno %\n", errno());
         exit(-1);
@@ -129,17 +151,38 @@ main :: () {
             exit(1);
         }
         if wait_result == 0 {
-            print("Nothing has happened yet, continuing…\n");
+            // print("Nothing has happened yet, continuing…\n");
             continue;
         }
 
         print("Something has happened in the target process!\n");
         if WIFSTOPPED(status) && WSTOPSIG(status) == SIGTRAP {
+            if (target.temporarily_disabled_breakpoint_index != -1) {
+                enable_breakpoint(*target, target.temporarily_disabled_breakpoint_index);
+                target.temporarily_disabled_breakpoint_index = -1;
+            }
+
+            fetch_registers(*target);
+
+            request := Ptrace_Request.CONT;
+            for target.breakpoints {
+                if it.address == target.registers.rip - 1 {
+                    print("We hit breakpoint number %!\n", it_index);
+                    target.registers.rip -= 1;
+                    set_registers(*target);
+                    disable_breakpoint(*target, it_index);
+                    target.temporarily_disabled_breakpoint_index = it_index;
+                    request = .SINGLESTEP;
+                    break;
+                }
+            }
+
+            fetch_fp_registers(*target);
             print_registers(*target);
 
-            result = ptrace(.CONT, target.pid, null, null);
+            result = ptrace(request, target.pid, null, null);
             if result != 0 {
-                log_error("Could not continue. .CONT failed with errno %\n", errno());
+                log_error("Could not continue. .% failed with errno %\n", request, errno());
                 try_kill_and_reap(target.pid);
                 exit(-1);
             }
@@ -170,32 +213,83 @@ Target_State :: struct {
     error_pipe: s32;
     done_output: bool;
     done_error: bool;
+    breakpoints: [..] Breakpoint;
+
+    registers: User_Regs;
+    fp_registers: User_Fpregs;
+
+    temporarily_disabled_breakpoint_index: int = -1;
 }
 
-read_entire_pipe :: (fd: s32, builder: *String_Builder, print_result: bool) -> success: bool {
-    buffer: [2048] u8;
-    while true {
-        bytes_read := read(fd, buffer.data, buffer.count-1);
-        if bytes_read == 0  return true;
-        if bytes_read < 0 {
-            read_error := errno();
-            if read_error == EAGAIN || read_error == EWOULDBLOCK {
-                // @Incomplete: Also ignore EINTR?
-                break;
-            }
-            return false;
-        }
+Breakpoint :: struct {
+    address: u64;
+    original_instruction_word: s64;
+}
 
-        append(builder, buffer.data, bytes_read);
-        if print_result {
-            buffer_str := to_string(buffer.data, bytes_read);
-            print("%", buffer_str);
+add_breakpoint :: (using target: *Target_State, address: u64) -> success: bool, breakpoint: Breakpoint {
+    for breakpoints {
+        if it.address == address {
+            return true, it;
         }
+    }
+
+    print("Adding new breakpoint at 0x%\n", formatHex64(address));
+
+    aligned_address := address & ~(0x7);
+    target_offset := address - aligned_address;
+
+    set_errno(0);
+    original_word := ptrace(.PEEKTEXT, pid, cast(*void)aligned_address, null);
+    if original_word == -1 {
+        error := errno();
+        if error != 0 {
+            log_error("Could not get program text at address %: %\n", formatHex64(aligned_address), error);
+            return false, .{};
+        }
+    }
+
+    breakpoint: Breakpoint;
+    breakpoint.address = address;
+    breakpoint.original_instruction_word = original_word;
+    array_add(*breakpoints, breakpoint);
+
+    success := enable_breakpoint(target, breakpoints.count - 1);
+    return success, breakpoint;
+}
+
+enable_breakpoint :: (using target: *Target_State, breakpoint_index: int) -> success: bool {
+    breakpoint := target.breakpoints[breakpoint_index];
+    print("Enabling breakpoint at 0x%\n", formatHex64(breakpoint.address));
+    aligned_address := breakpoint.address & ~(0x7);
+    target_offset := breakpoint.address - aligned_address;
+
+    modified_word := breakpoint.original_instruction_word & ~(0xFF << (target_offset * 8));
+    modified_word |= OPCODE_INT3 << (target_offset * 8);
+    print("Original: %\nModified: %\n", formatHex64(breakpoint.original_instruction_word), formatHex64(modified_word));
+    result := ptrace(.POKETEXT, pid, cast(*void)aligned_address, cast(*void)modified_word);
+    if result != 0 {
+        log_error("Could not update program text at address %: %\n", formatHex64(aligned_address), errno());
+        return false;
     }
 
     return true;
 }
 
+disable_breakpoint :: (using target: *Target_State, breakpoint_index: int) -> success: bool {
+    breakpoint := target.breakpoints[breakpoint_index];
+    print("Disabling breakpoint at 0x%\n", formatHex64(breakpoint.address));
+
+    aligned_address := breakpoint.address & ~(0x7);
+    target_offset := breakpoint.address - aligned_address;
+
+    result := ptrace(.POKETEXT, pid, cast(*void)aligned_address, cast(*void)breakpoint.original_instruction_word);
+    if result != 0 {
+        log_error("Could not update program text at address %: %\n", formatHex64(aligned_address), errno());
+        return false;
+    }
+
+    return true;
+}
 
 print_target_output :: (using target: *Target_State) -> success: bool {
     success := print_entire_pipe(output_pipe);
@@ -208,29 +302,40 @@ print_target_output :: (using target: *Target_State) -> success: bool {
     return true;
 }
 
-print_registers :: (using target: *Target_State) -> success: bool{
-    regs: User_Regs = ---;
-    result := ptrace(.GETREGS, pid, null, *regs);
+fetch_registers :: (using target: *Target_State) -> success: bool {
+    result := ptrace(.GETREGS, pid, null, *target.registers);
     if result != 0 {
         log_error("Could not get registers. .GETREGS failed with errno %\n", errno());
         return false;
     }
-    print("Registers: %\n", regs);
-
-    fpregs: User_Fpregs = ---;
-    result = ptrace(.GETFPREGS, pid, null, *fpregs);
-    if result != 0 {
-        log_error("Could not get FP registers. .GETFPREGS failed with errno %\n", errno());
-        return false;
-    }
-    print("FP Registers: %\n", fpregs);
 
     return true;
 }
 
-Breakpoint :: struct {
-    address: u64;
-    original_instruction_word: s64;
+set_registers :: (using target: *Target_State) -> success: bool {
+    result := ptrace(.SETREGS, pid, null, *target.registers);
+    if result != 0 {
+        log_error("Could not set registers. .SETREGS failed with errno %\n", errno());
+        return false;
+    }
+
+    return true;
+}
+
+fetch_fp_registers :: (using target: *Target_State) -> success: bool {
+    result := ptrace(.GETFPREGS, pid, null, *target.fp_registers);
+    if result != 0 {
+        log_error("Could not get FP registers. .GETFPREGS failed with errno %\n", errno());
+        return false;
+    }
+
+    return true;
+}
+
+print_registers :: (using target: *Target_State) {
+    print("RIP: %\n", formatHex64(registers.rip));
+    print("Registers: %\n", registers);
+    // print("FP Registers: %\n", fp_registers);
 }
 
 spawn_target_process :: (cmd: [] string, working_directory: string) -> success: bool, pid: pid_t, output_pipe: s32, error_pipe: s32 {
@@ -376,6 +481,10 @@ try_kill_and_reap :: (pid: pid_t) {
 
 
 #scope_file
+
+OPCODE_INT3 :: 0xCC;
+
+formatHex64 :: #bake_arguments formatInt(base = 16, minimum_digits = 16);
 
 #import "Basic";
 #import "POSIX";
