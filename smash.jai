@@ -1,5 +1,25 @@
+
+Args :: struct {
+    work_dir: string;
+}
+
 main :: () {
-    success, pid, output_pipe, error_pipe := spawn_target_process(.["echo", "hello debugger"], "");
+    args_success, args, is_set, extra_args := parse_arguments(Args, allow_free_arguments = true);
+    if !args_success {
+        log_error("Could not parse arguments\n");
+        exit(1);
+    }
+
+    target_args := extra_args;
+    if !target_args {
+        log_error("Hey man! You should tell us what to run!!\n");
+        exit(1);
+    }
+    command := join(.. target_args, separator = " ");
+    defer free(command);
+    print("Launching %\n", command);
+
+    success, pid, output_pipe, error_pipe := spawn_target_process(target_args, args.work_dir);
     if !success {
         log_error("Failed to spawn target process!\n");
         exit(-1);
@@ -271,9 +291,12 @@ try_kill_and_reap :: (pid: pid_t) {
     }
 }
 
+
 #scope_file
 
 #import "Basic";
 #import "POSIX";
+#import "Command_Line";
+#import "String";
 
 #load "ptrace.jai";
