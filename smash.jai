@@ -35,6 +35,28 @@ main :: () {
         exit(1);
     }
 
+    old_teminal_settings: termios;
+    {
+        result := tcgetattr(STDIN_FILENO, *old_teminal_settings);
+        if result != 0 {
+            log_error("Could not get terminal settings: %", errno());
+            exit(1);
+        }
+        new_settings := old_teminal_settings;
+        new_settings.c_lflag &= ~(Terminal_Lflags.ICANON | .ECHO);
+        result = tcsetattr(STDIN_FILENO, .TCSANOW, *new_settings);
+        if result != 0 {
+            log_error("Could not set terminal settings: %", errno());
+            exit(1);
+        }
+    }
+    defer {
+        result := tcsetattr(STDIN_FILENO, .TCSANOW, *old_teminal_settings);
+        if result != 0 {
+            log_error("Could not restore old terminal settings: %", errno());
+        }
+    }
+
     target_program_path := target_args[0];
     success := read_target_program(target_program_path);
     if !success {
@@ -72,14 +94,17 @@ main :: () {
 
     fcntl(target.output_pipe, F_SETFL, fcntl(target.output_pipe, F_GETFL) | O_NONBLOCK);
     fcntl(target.error\_pipe, F_SETFL, fcntl(target.error\_pipe, F_GETFL) | O_NONBLOCK);
+    fcntl(STDIN_FILENO, F_SETFL, fcntl(STDIN_FILENO, F_GETFL) | O_NONBLOCK);
 
 
-    poll_fds: [3] pollfd;
+    poll_fds: [4] pollfd;
     poll_fds[0].fd = target.output_pipe;
     poll_fds[0].events = POLLIN;
     poll_fds[1].fd = target.error_pipe;
     poll_fds[1].events = POLLIN;
-    num_fds: u32 = 2;
+    poll_fds[2].fd = STDIN_FILENO;
+    poll_fds[2].events = POLLIN;
+    num_fds: u32 = 3;
 
     // Using a timer for this SUCKS because it introduces a fixed delay to everything the debugger does.
     // But there’s no clean way of waiting for child events like waitpid does, but with using poll().
@@ -90,6 +115,7 @@ main :: () {
     //      - rluba 2021-12-01
     timeout_ms := 10;
     timer_fd: s32 = -1;
+    timer_fd_index: int = ---;
     defer {
         if timer_fd != -1 {
             close(timer_fd);
@@ -106,6 +132,7 @@ main :: () {
 
         poll_fds[num_fds].fd = timer_fd;
         poll_fds[num_fds].events = POLLIN;
+        timer_fd_index = num_fds;
         num_fds += 1;
 
         timeout_spec: timespec;
@@ -132,6 +159,10 @@ main :: () {
         if poll_fds[1].revents & POLLIN {
             success = print_entire_pipe(target.error_pipe) && success;
         }
+        if poll_fds[2].revents & POLLIN {
+            print("The horse says: ");
+            success = print_entire_pipe(STDIN_FILENO) && success;
+        }
         if !success {
             log_error("Couldn’t read output of target\n");
             try_kill_and_reap(target.pid);
@@ -141,7 +172,7 @@ main :: () {
         if poll_fds[0].revents & POLLHUP    target.done_output = true;
         if poll_fds[1].revents & POLLHUP    target.done_error = true;
 
-        if timeout_ms && poll_fds[2].revents & POLLIN {
+        if timeout_ms && poll_fds[timer_fd_index].revents & POLLIN {
             num_exp: u64;
             size_read := read(timer_fd, *num_exp, size_of(type_of(num_exp)));
             if size_read != size_of(type_of(num_exp)) {
@@ -500,3 +531,4 @@ formatHex64 :: #bake_arguments formatInt(base = 16, minimum_digits = 16);
 
 #load "ptrace.jai";
 #load "elf.jai";
+#load "termios.jai";
