@@ -130,14 +130,8 @@ main :: () {
         num_fds += 1;
     }
 
-    Debugger_Action :: enum {
-        NOTHING;
-        CONTINUE;
-        STEP;
-        // PRINT_REGISTERS;
-    }
-
     exit_code: s32;
+    pending_action := Debugger_Action.NOTHING;
     next_action := Debugger_Action.NOTHING;
     while true {
         num_events := poll(poll_fds.data, num_fds, -1);
@@ -207,15 +201,19 @@ main :: () {
                             set_registers(*target);
 
                             target.state = .HIT_BREAKPOINT;
+                            pending_action = .NOTHING;
                             disable_breakpoint(*target, it_index);
                             target.temporarily_disabled_breakpoint_index = it_index;
                             break;
                         }
                     }
-                    print("Target state changed to %\n", target.state);
 
-                    fetch_fp_registers(*target);
-                    print_registers(*target);
+                    if pending_action == .NOTHING {
+                        print("Target state changed to %\n", target.state);
+
+                        fetch_fp_registers(*target);
+                        print_registers(*target);
+                    }
                 } else {
                     if WIFEXITED(status) {
                         exit_code = cast(s32) WEXITSTATUS(status);
@@ -235,33 +233,20 @@ main :: () {
             }
         }
 
-        if target.state != .RUNNING && next_action != .NOTHING {
-            print("Taking next action: %\n", next_action);
-            if next_action == {
-                case .STEP;
-                    result := ptrace(.SINGLESTEP, target.pid, null, null);
-                    if result != 0 {
-                        log_error("Could not continue. .STEP failed with errno %\n", errno());
-                        try_kill_and_reap(target.pid);
-                        exit(-1);
-                    }
-                    next_action = .NOTHING;
-                case .CONTINUE;
-                    request := Ptrace_Request.CONT;
-                    if target.state == .HIT_BREAKPOINT {
-                        request = .SINGLESTEP;
-                    } else {
-                        next_action = .NOTHING;
-                    }
-
-                    result := ptrace(request, target.pid, null, null);
-                    if result != 0 {
-                        log_error("Could not continue. .% failed with errno %\n", request, errno());
-                        try_kill_and_reap(target.pid);
-                        exit(-1);
-                    }
+        if target.state != .RUNNING {
+            success = true;
+            if pending_action != .NOTHING {
+                print("Taking pending action: %\n", pending_action);
+                success, pending_action = take_action(*target, pending_action);
+            } else if next_action != .NOTHING {
+                print("Taking next action: %\n", next_action);
+                success, pending_action = take_action(*target, next_action);
+                next_action = .NOTHING;
             }
-            target.state = .RUNNING;
+            if !success {
+                try_kill_and_reap(target.pid);
+                exit(-1);
+            }
         }
     }
 
@@ -357,6 +342,38 @@ disable_breakpoint :: (using target: *Target, breakpoint_index: int) -> success:
     }
 
     return true;
+}
+
+Debugger_Action :: enum {
+    NOTHING;
+    CONTINUE;
+    STEP;
+}
+
+take_action :: (using target: *Target, action: Debugger_Action) -> success: bool, pending_action: Debugger_Action {
+    pending_action := Debugger_Action.NOTHING;
+    if action == {
+        case .STEP;
+            result := ptrace(.SINGLESTEP, target.pid, null, null);
+            if result != 0 {
+                log_error("Could not continue. .STEP failed with errno %\n", errno());
+                return false, .NOTHING;
+            }
+        case .CONTINUE;
+            request := Ptrace_Request.CONT;
+            if target.state == .HIT_BREAKPOINT {
+                request = .SINGLESTEP;
+                pending_action = action;
+            }
+
+            result := ptrace(request, target.pid, null, null);
+            if result != 0 {
+                log_error("Could not continue. .% failed with errno %\n", request, errno());
+                return false, .NOTHING;
+            }
+    }
+    target.state = .RUNNING;
+    return true, pending_action;
 }
 
 print_target_output :: (using target: *Target) -> success: bool {
