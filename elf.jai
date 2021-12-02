@@ -97,105 +97,145 @@ Elf_Section_Flags :: enum_flags u64 {
     EXCLUDE	         :: 0x8000000;  //   Section is excluded unless referenced or allocated (Solaris
 }
 
-read_target_program :: (path: string) -> success: bool {
-    file_content, success := read_entire_file(path);
+Elf :: struct {
+    content: string;
+    header: *Elf_Header;
+    sections: [] Elf_Section_Header;
+    names_section: *Elf_Section_Header;
+    section_names: string;
 
+    text_section: *Elf_Section_Header;
+    debug_line_section: *Elf_Section_Header;
+    text: [] u8;
+}
+
+// @ToDo: Clean up on errors
+read_target_program :: (path: string) -> success: bool, elf: Elf  {
+    using elf: Elf = ---;
+    success: bool = ---;
+    elf.content, success = read_entire_file(path);
+    
     if !success {
         log_error("Could not load program %\n", path);
-        return false;
+        return false, elf;
     }
 
-    if file_content.count < size_of(Elf_Header) {
+    if elf.content.count < size_of(Elf_Header) {
         log_error("File is too small to be a ELF binary: %", path);
-        return false;
+        return false, elf;
     }
 
-    header := cast(*Elf_Header) file_content.data;
+    elf.header = cast(*Elf_Header) elf.content.data;
     print("ELF header: %\n", <<header);
 
     if header.ident.magic != EXPECTED_MAGIC {
         log_error("File does not appear to be a ELF binary: %", path);
-        return false;
+        return false, elf;
     }
     if header.ident.class != 2 {
         log_error("Unsupported ELF class % (maybe it’s a 32-bit binary?)", header.ident.class);
-        return false;
+        return false, elf;
     }
     if header.ident.data != 1 {
         log_error("Unsupported ELF endianness %", header.ident.data);
-        return false;
+        return false, elf;
     }
     if header.ident.version != 1 {
         log_error("Unsupported ELF version %", header.ident.version);
-        return false;
+        return false, elf;
     }
     if header.ident.os_abi != .SYSTEM_V {
         log_error("Unsupported ELF OS ABI %", header.ident.os_abi);
-        return false;
+        return false, elf;
     }
     if header.machine != .AMD_x64 {
         log_error("Unsupported ELF ISA %", header.machine);
-        return false;
+        return false, elf;
     }
     if header.version != 1 {
         log_error("Unsupported ELF version %", header.version);
-        return false;
+        return false, elf;
     }
     if header.ehsize != size_of(Elf_Header) {
         log_error("Unexpected header size: % (expected %)", header.ehsize, size_of(Elf_Header));
-        return false;
+        return false, elf;
     }
     if header.section_header_entry_size != size_of(Elf_Section_Header) {
         log_error("Unexpected section header size: % (expected %)", header.section_header_entry_size, size_of(Elf_Section_Header));
-        return false;
+        return false, elf;
     }
 
-    if header.section_header_offset + header.num_section_headers * header.section_header_entry_size > cast (u64) file_content.count {
+    if header.section_header_offset + header.num_section_headers * header.section_header_entry_size > cast (u64) elf.content.count {
         log_error("Invalid section header offset: %", header.section_header_offset);
-        return false;
+        return false, elf;
     }
     if header.section_names_section_index >= header.num_section_headers {
         log_error("Invalid names section index: %", header.section_names_section_index);
-        return false;
+        return false, elf;
     }
 
-    section_headers_pointer := file_content.data + header.section_header_offset;
-    names_section_header := cast (*Elf_Section_Header) (section_headers_pointer + header.section_names_section_index * header.section_header_entry_size);
-    if names_section_header.type != .STRTAB {
-        log_error("Section names section has an unexpected type: %", names_section_header.type);
-        return false;
+    elf.sections.data = cast (*Elf_Section_Header) (elf.content.data + header.section_header_offset);
+    elf.sections.count = header.num_section_headers;
+
+    elf.names_section = *elf.sections[header.section_names_section_index];
+    if elf.names_section.type != .STRTAB {
+        log_error("Section names section has an unexpected type: %", elf.names_section.type);
+        return false, elf;
     }
-    if !validate_section_header(names_section_header, file_content.count)   return false;
+    if !validate_section_header(elf.names_section, elf.content.count)   return false, elf;
 
-    section_names: string = ---;
-    section_names.data = file_content.data + names_section_header.offset;
-    section_names.count = cast (s64) names_section_header.size;
+    elf.section_names.data = elf.content.data + elf.names_section.offset;
+    elf.section_names.count = cast (s64) names_section.size;
 
-    debug_line_section: *Elf_Section_Header;
-    for 0..header.num_section_headers - 1 {
-        section := cast (*Elf_Section_Header) (file_content.data + header.section_header_offset + it * header.section_header_entry_size);
-        print("Section header %: %\n", it, <<section);
-        if !validate_section_header(section, file_content.count)     return false;
-        if section.name_offset > section_names.count {
-            print("Invalid section name offset: %\n", section.name_offset);
-            return false;
+    elf.text_section = null;
+    elf.debug_line_section = null;
+    for * elf.sections {
+        print("Section header %: %\n", it_index, <<it);
+        if !validate_section_header(it, elf.content.count)     return false, elf;
+        if it.name_offset > section_names.count {
+            print("Invalid section name offset: %\n", it.name_offset);
+            return false, elf;
         }
 
         // @Stability: this doesn’t check for overflows!
-        section_name := to_string(section_names.data + section.name_offset);
+        section_name := to_string(section_names.data + it.name_offset);
         print("Section name: %\n", section_name);
         if section_name == ".debug_line" {
-            if debug_line_section {
-                log_error("Found another debug line section at %\n", it);
-                return false;
+            if it.type != .PROGBITS {
+                log_error("Invalid debug line section at %: %\n", it_index, <<it);
+                return false, elf;
             }
-            debug_line_section = section;
+            if elf.debug_line_section {
+                log_error("Found another debug line section at %\n", it_index);
+                return false, elf;
+            }
+            elf.debug_line_section = it;
+        }
+        if section_name == ".text" {
+            if it.type != .PROGBITS || !(it.flags & .EXECINSTR) {
+                log_error("Invalid text section at %: %\n", it_index, <<it);
+                return false, elf;
+            }
+
+            if elf.text_section {
+                log_error("Found another text section at %\n", it_index);
+                return false, elf;
+            }
+            elf.text_section = it;
+            elf.text.data = elf.content.data + elf.text_section.offset;
+            elf.text.count = cast (s64) elf.text_section.size;
         }
     }
 
-    print("Debug line section: %\n", << debug_line_section);
+    print("Text section: %\n", << elf.text_section);
+    print("Debug line section: %\n", << elf.debug_line_section);
 
-    return true;
+    if !elf.text_section {
+        log_error("Could not find text section\n");
+        return false, elf;
+    }
+
+    return true, elf;
 }
 
 validate_section_header :: (section_header: *Elf_Section_Header, file_size: s64) -> success: bool {

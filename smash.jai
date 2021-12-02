@@ -7,10 +7,18 @@ timeout_ms := 10;
 
 main :: () {
     context.logger = debugger_logger;
+
+    // We have to wrap main so we can ensure that the defer can restore the original temrinal settings before we exit.
+    // sigh...
+    return_code := do_main();
+    exit(return_code);
+}
+
+do_main :: () -> s32 {
     args_success, args, is_set, extra_args := parse_arguments(Args, allow_free_arguments = true);
     if !args_success {
         log_error("Could not parse arguments\n");
-        exit(1);
+        return 1;
     }
 
     address: u64;
@@ -26,7 +34,7 @@ main :: () {
         }
         if !success || remainder {
             log("Could not parse breakpoint address\n");
-            exit(1);
+            return 1;
         }
         address = cast(u64) result;
     }
@@ -34,7 +42,7 @@ main :: () {
     target_args := extra_args;
     if !target_args {
         log_error("Usage: % [-work_dir <dir>] [-breakpoint <address>] [--] <program to run + args>", get_command_line_arguments()[0]);
-        exit(1);
+        return 1;
     }
 
     old_teminal_settings: termios;
@@ -42,14 +50,14 @@ main :: () {
         result := tcgetattr(STDIN_FILENO, *old_teminal_settings);
         if result != 0 {
             log_error("Could not get terminal settings: %", errno());
-            exit(1);
+            return 1;
         }
         new_settings := old_teminal_settings;
         new_settings.c_lflag &= ~(Terminal_Lflags.ICANON | .ECHO);
         result = tcsetattr(STDIN_FILENO, .TCSANOW, *new_settings);
         if result != 0 {
             log_error("Could not set terminal settings: %", errno());
-            exit(1);
+            return 1;
         }
     }
     defer {
@@ -60,11 +68,19 @@ main :: () {
     }
 
     target_program_path := target_args[0];
-    success := read_target_program(target_program_path);
+    success, elf := read_target_program(target_program_path);
     if !success {
         log_error("Could not read target program\n");
-        exit(1);
+        return 1;
     }
+
+    {
+        xed_tables_init();
+        format_options: Xed_Format_Options;
+        xed_format_set_options(format_options);
+
+    }
+
 
     command := join(.. target_args, separator = " ");
     defer free(command);
@@ -74,7 +90,7 @@ main :: () {
     success, target.pid, target.output_pipe, target.error_pipe = spawn_target_process(target_args, args.work_dir);
     if !success {
         log_error("Failed to spawn target process!\n");
-        exit(-1);
+        return 1;
     }
 
     defer {
@@ -122,7 +138,7 @@ main :: () {
         timer_fd, success = create_timer(timeout_ms);
         if !success {
             try_kill_and_reap(target.pid);
-            exit(1);
+            return 1;
         }
                     
         timer_fd_index = num_fds;
@@ -131,7 +147,7 @@ main :: () {
         num_fds += 1;
     }
 
-    exit_code: s32;
+    target_exit_code: s32;
     pending_action := Debugger_Action.NOTHING;
     next_action := Debugger_Action.NOTHING;
     while true {
@@ -163,7 +179,7 @@ main :: () {
         if !success {
             log_error("Couldn’t read events\n");
             try_kill_and_reap(target.pid);
-            exit(1);
+            return 1;
         }
 
         if poll_fds[0].revents & POLLHUP    target.done_output = true;
@@ -183,7 +199,7 @@ main :: () {
             if wait_result == -1 {
                 log_error("Couldn’t wait for target process: %\n", errno());
                 try_kill_and_reap(target.pid);
-                exit(1);
+                return 1;
             }
             if wait_result != 0 {
                 // log("Something has happened in the target process!\n");
@@ -216,11 +232,27 @@ main :: () {
 
                         fetch_fp_registers(*target);
                         print_registers(*target);
+
+                        if (target.registers.rip < elf.text_section.address || target.registers.rip > elf.text_section.address + elf.text_section.size) {
+                            log_error("RIP seems to be out of bounds!\n");
+                        } else {
+                            text_offset := target.registers.rip - elf.text_section.address;
+                            success, inst := decode_instruction(*elf, text_offset);
+                            if !success {
+                                log_error("Could not decode instruction at %\n", formatHex64(target.registers.rip));
+                                return 1;
+                            }
+                            success = print_instruction(inst, target.registers.rip);
+                            if !success {
+                                log_error("Could not print instruction at %\n", formatHex64(target.registers.rip));
+                                return 1;
+                            }
+                        }
                     }
                 } else {
                     if WIFEXITED(status) {
-                        exit_code = cast(s32) WEXITSTATUS(status);
-                        log("Target has exited with code %\n", exit_code);
+                        target_exit_code = cast(s32) WEXITSTATUS(status);
+                        log("Target has exited with code %\n", target_exit_code);
                         break;
                     }
                     if WIFSIGNALED(status) {
@@ -231,7 +263,7 @@ main :: () {
                     }
                     log_error("Something unexpected happened in the target process: %\n", status);
                     try_kill_and_reap(target.pid);
-                    exit(-1);
+                    return 1;
                 }
             }
         }
@@ -248,12 +280,13 @@ main :: () {
             }
             if !success {
                 try_kill_and_reap(target.pid);
-                exit(-1);
+                return 1;
             }
         }
     }
 
     log("BYEEEEE\n");
+    return 0;
 }
 
 Target :: struct {
@@ -612,6 +645,34 @@ create_timer :: (timeout_ms: int) -> timer_fd: s32, success: bool {
     return timer_fd, true;
 }
 
+decode_instruction :: (elf: *Elf, offset: u64) -> success: bool, inst: Xed_Decoded_Inst {
+    inst: Xed_Decoded_Inst = ---;
+    xed_decoded_inst_zero(*inst);
+    xed_decoded_inst_set_mode(*inst, .LONG_64, .WIDTH_64B);
+
+    error := xed_decode(*inst, elf.text.data + offset, cast (u32) (elf.text.count - cast(s64) offset));
+    if error != .NONE {
+        log_error("Could not decode instruction: %\n", error);
+        return false, inst;
+    }
+
+    return true, inst;
+}
+
+print_instruction :: (inst: Xed_Decoded_Inst, address: u64) -> success: bool {
+    // log("Instruction: %\n", inst);
+    inst_buffer: [32] u8; 
+    success := xed_format_context(.ATT, *inst, inst_buffer.data, inst_buffer.count, address, null, null);
+    if !success {
+        log_error("Could not format instruction\n");
+        return false;
+    }
+
+    inst_str := to_string(inst_buffer.data);
+    log("Instruction: %\n", inst_str);
+    return true;
+}
+
 
 #scope_file
 
@@ -639,3 +700,4 @@ formatHex64 :: #bake_arguments formatInt(base = 16, minimum_digits = 16);
 #load "ptrace.jai";
 #load "elf.jai";
 #load "termios.jai";
+#load "xed.jai";
