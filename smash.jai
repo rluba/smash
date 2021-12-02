@@ -74,13 +74,28 @@ do_main :: () -> s32 {
         return 1;
     }
 
+    xed_tables_init();
+    format_options: Xed_Format_Options;
+    xed_format_set_options(format_options);
+
+    instruction_addresses: [..] u64;
+    instructions: [..] Xed_Decoded_Inst;
     {
-        xed_tables_init();
-        format_options: Xed_Format_Options;
-        xed_format_set_options(format_options);
-
+        array_reserve(*instruction_addresses, elf.text.count / 5);
+        array_reserve(*instructions, elf.text.count / 5);
+        offset := 0;
+        while offset < elf.text.count {
+            address := elf.text_section.address + cast (u64) offset;
+            array_add(*instruction_addresses, address);
+            inst := array_add(*instructions);
+            success := decode_instruction(*elf, offset, inst);
+            if !success {
+                log_error("Could not decode instruction at 0x%\n", formatHex64(address));
+                return 1;
+            }
+            offset += inst._decoded_length;
+        }
     }
-
 
     command := join(.. target_args, separator = " ");
     defer free(command);
@@ -233,19 +248,26 @@ do_main :: () -> s32 {
                         fetch_fp_registers(*target);
                         print_registers(*target);
 
-                        if (target.registers.rip < elf.text_section.address || target.registers.rip > elf.text_section.address + elf.text_section.size) {
-                            log_error("RIP seems to be out of bounds!\n");
-                        } else {
-                            text_offset := target.registers.rip - elf.text_section.address;
-                            success, inst := decode_instruction(*elf, text_offset);
-                            if !success {
-                                log_error("Could not decode instruction at %\n", formatHex64(target.registers.rip));
-                                return 1;
+                        rip := target.registers.rip;
+                        rip_instruction_index := -1;
+                        for instruction_addresses {
+                            if rip == it {
+                                rip_instruction_index = it_index;
+                                break;
                             }
-                            success = print_instruction(inst, target.registers.rip);
-                            if !success {
-                                log_error("Could not print instruction at %\n", formatHex64(target.registers.rip));
-                                return 1;
+                        }
+                        if rip_instruction_index == -1 {
+                            log_error("Could not find instruction for RIP %\n", formatHex64(rip));
+                        } else {
+                            start := Max(rip_instruction_index - 5, 0);
+                            end := Min(rip_instruction_index + 5, instructions.count);
+                            for start..end {
+                                inst := *instructions[it];
+                                success = print_instruction(<<inst, target.registers.rip, it == rip_instruction_index);
+                                if !success {
+                                    log_error("Could not print instruction at %\n", formatHex64(instruction_addresses[it]));
+                                    return 1;
+                                }
                             }
                         }
                     }
@@ -645,21 +667,20 @@ create_timer :: (timeout_ms: int) -> timer_fd: s32, success: bool {
     return timer_fd, true;
 }
 
-decode_instruction :: (elf: *Elf, offset: u64) -> success: bool, inst: Xed_Decoded_Inst {
-    inst: Xed_Decoded_Inst = ---;
-    xed_decoded_inst_zero(*inst);
-    xed_decoded_inst_set_mode(*inst, .LONG_64, .WIDTH_64B);
+decode_instruction :: (elf: *Elf, offset: s64, inst: *Xed_Decoded_Inst) -> success: bool {
+    xed_decoded_inst_zero(inst);
+    xed_decoded_inst_set_mode(inst, .LONG_64, .WIDTH_64B);
 
-    error := xed_decode(*inst, elf.text.data + offset, cast (u32) (elf.text.count - cast(s64) offset));
+    error := xed_decode(inst, elf.text.data + offset, cast (u32) (elf.text.count - offset));
     if error != .NONE {
         log_error("Could not decode instruction: %\n", error);
-        return false, inst;
+        return false;
     }
 
-    return true, inst;
+    return true;
 }
 
-print_instruction :: (inst: Xed_Decoded_Inst, address: u64) -> success: bool {
+print_instruction :: (inst: Xed_Decoded_Inst, address: u64, is_current_instruction: bool) -> success: bool {
     // log("Instruction: %\n", inst);
     inst_buffer: [32] u8; 
     success := xed_format_context(.ATT, *inst, inst_buffer.data, inst_buffer.count, address, null, null);
@@ -669,7 +690,11 @@ print_instruction :: (inst: Xed_Decoded_Inst, address: u64) -> success: bool {
     }
 
     inst_str := to_string(inst_buffer.data);
-    log("Instruction: %\n", inst_str);
+    if is_current_instruction {
+        log("-> %\n", inst_str);
+    } else {
+        log("   %\n", inst_str);
+    }
     return true;
 }
 

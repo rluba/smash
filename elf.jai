@@ -1,3 +1,15 @@
+Elf :: struct {
+    content: string;
+    header: *Elf_Header;
+    sections: [] Elf_Section_Header;
+    names_section: *Elf_Section_Header;
+    section_names: string;
+
+    text_section: *Elf_Section_Header;
+    debug_line_section: *Elf_Section_Header;
+    text: [] u8;
+}
+
 Elf_Header :: struct {
     ident: struct {
         magic: u32;
@@ -95,18 +107,6 @@ Elf_Section_Flags :: enum_flags u64 {
     MASKPROC         :: 0xf0000000; //	Processor-specific
     ORDERED 	     :: 0x4000000;  // Special ordering requirement (Solaris)
     EXCLUDE	         :: 0x8000000;  //   Section is excluded unless referenced or allocated (Solaris
-}
-
-Elf :: struct {
-    content: string;
-    header: *Elf_Header;
-    sections: [] Elf_Section_Header;
-    names_section: *Elf_Section_Header;
-    section_names: string;
-
-    text_section: *Elf_Section_Header;
-    debug_line_section: *Elf_Section_Header;
-    text: [] u8;
 }
 
 // @ToDo: Clean up on errors
