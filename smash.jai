@@ -6,6 +6,7 @@ Args :: struct {
 timeout_ms := 10;
 
 main :: () {
+    context.logger = debugger_logger;
     args_success, args, is_set, extra_args := parse_arguments(Args, allow_free_arguments = true);
     if !args_success {
         log_error("Could not parse arguments\n");
@@ -24,7 +25,7 @@ main :: () {
             result, success, remainder = string_to_int(args.breakpoint, 10);
         }
         if !success || remainder {
-            print("Could not parse breakpoint address\n");
+            log("Could not parse breakpoint address\n");
             exit(1);
         }
         address = cast(u64) result;
@@ -67,7 +68,7 @@ main :: () {
 
     command := join(.. target_args, separator = " ");
     defer free(command);
-    print("Launching %\n", command);
+    log("Launching %\n", command);
 
     target: Target;
     success, target.pid, target.output_pipe, target.error_pipe = spawn_target_process(target_args, args.work_dir);
@@ -81,7 +82,7 @@ main :: () {
         close(target.error_pipe);
     }
 
-    print("Target process launched (pid %)!\n", target.pid);
+    log("Target process launched (pid %)!\n", target.pid);
 
     target.state = .PAUSED;
     
@@ -153,7 +154,9 @@ main :: () {
                     case #char "s";
                         next_action = .STEP;
                 }
-                print("Next action: %\n", next_action);
+                if next_action != .NOTHING {
+                    log("Next action: %\n", next_action);
+                }
             }
             success = read_success && success;
         }
@@ -183,7 +186,7 @@ main :: () {
                 exit(1);
             }
             if wait_result != 0 {
-                print("Something has happened in the target process!\n");
+                // log("Something has happened in the target process!\n");
                 if WIFSTOPPED(status) && WSTOPSIG(status) == SIGTRAP {
                     if (target.temporarily_disabled_breakpoint_index != -1) {
                         enable_breakpoint(*target, target.temporarily_disabled_breakpoint_index);
@@ -195,7 +198,7 @@ main :: () {
 
                     for target.breakpoints {
                         if it.address == target.registers.rip - 1 {
-                            print("We hit breakpoint number %!\n", it_index);
+                            log("We hit breakpoint number %!\n", it_index);
 
                             target.registers.rip -= 1;
                             set_registers(*target);
@@ -209,7 +212,7 @@ main :: () {
                     }
 
                     if pending_action == .NOTHING {
-                        print("Target state changed to %\n", target.state);
+                        // log("Target state changed to %\n", target.state);
 
                         fetch_fp_registers(*target);
                         print_registers(*target);
@@ -217,7 +220,7 @@ main :: () {
                 } else {
                     if WIFEXITED(status) {
                         exit_code = cast(s32) WEXITSTATUS(status);
-                        print("Target has exited with code %\n", exit_code);
+                        log("Target has exited with code %\n", exit_code);
                         break;
                     }
                     if WIFSIGNALED(status) {
@@ -236,10 +239,10 @@ main :: () {
         if target.state != .RUNNING {
             success = true;
             if pending_action != .NOTHING {
-                print("Taking pending action: %\n", pending_action);
+                // log("Taking pending action: %\n", pending_action);
                 success, pending_action = take_action(*target, pending_action);
             } else if next_action != .NOTHING {
-                print("Taking next action: %\n", next_action);
+                // log("Taking next action: %\n", next_action);
                 success, pending_action = take_action(*target, next_action);
                 next_action = .NOTHING;
             }
@@ -250,7 +253,7 @@ main :: () {
         }
     }
 
-    print("BYEEEEE\n");
+    log("BYEEEEE\n");
 }
 
 Target :: struct {
@@ -286,7 +289,7 @@ add_breakpoint :: (using target: *Target, address: u64) -> success: bool, breakp
         }
     }
 
-    print("Adding new breakpoint at 0x%\n", formatHex64(address));
+    log("Adding new breakpoint at 0x%\n", formatHex64(address));
 
     aligned_address := address & ~(0x7);
     target_offset := address - aligned_address;
@@ -312,13 +315,13 @@ add_breakpoint :: (using target: *Target, address: u64) -> success: bool, breakp
 
 enable_breakpoint :: (using target: *Target, breakpoint_index: int) -> success: bool {
     breakpoint := target.breakpoints[breakpoint_index];
-    print("Enabling breakpoint at 0x%\n", formatHex64(breakpoint.address));
+    // log("Enabling breakpoint at 0x%\n", formatHex64(breakpoint.address));
     aligned_address := breakpoint.address & ~(0x7);
     target_offset := breakpoint.address - aligned_address;
 
     modified_word := breakpoint.original_instruction_word & ~(0xFF << (target_offset * 8));
     modified_word |= OPCODE_INT3 << (target_offset * 8);
-    print("Original: %\nModified: %\n", formatHex64(breakpoint.original_instruction_word), formatHex64(modified_word));
+    // log("Original: %\nModified: %\n", formatHex64(breakpoint.original_instruction_word), formatHex64(modified_word));
     result := ptrace(.POKETEXT, pid, cast(*void)aligned_address, cast(*void)modified_word);
     if result != 0 {
         log_error("Could not update program text at address %: %\n", formatHex64(aligned_address), errno());
@@ -330,7 +333,7 @@ enable_breakpoint :: (using target: *Target, breakpoint_index: int) -> success: 
 
 disable_breakpoint :: (using target: *Target, breakpoint_index: int) -> success: bool {
     breakpoint := target.breakpoints[breakpoint_index];
-    print("Disabling breakpoint at 0x%\n", formatHex64(breakpoint.address));
+    // log("Disabling breakpoint at 0x%\n", formatHex64(breakpoint.address));
 
     aligned_address := breakpoint.address & ~(0x7);
     target_offset := breakpoint.address - aligned_address;
@@ -418,9 +421,9 @@ fetch_fp_registers :: (using target: *Target) -> success: bool {
 }
 
 print_registers :: (using target: *Target) {
-    print("RIP: %\n", formatHex64(registers.rip));
-    print("Registers: %\n", registers);
-    // print("FP Registers: %\n", fp_registers);
+    log("RIP: %\n", formatHex64(registers.rip));
+    log("Registers: %\n", registers);
+    // log("FP Registers: %\n", fp_registers);
 }
 
 spawn_target_process :: (cmd: [] string, working_directory: string) -> success: bool, pid: pid_t, output_pipe: s32, error_pipe: s32 {
@@ -611,6 +614,18 @@ create_timer :: (timeout_ms: int) -> timer_fd: s32, success: bool {
 
 
 #scope_file
+
+debugger_logger :: (message: string, data: *void, info: Log_Info) {
+    color := 240;
+    if info.common_flags & .ERROR {
+        color = 1;
+    }
+
+    print("\e[38;5;%m%\e[0;m", color, message);
+
+    if message && (message[message.count-1] != #char "\n") write_string("\n");
+}
+
 
 OPCODE_INT3 :: 0xCC;
 
