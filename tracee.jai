@@ -1,6 +1,6 @@
 main :: () {
     print("Before breaking\n");
-    debug_break();
+    breakpoint();
     print("After breaking\n");
     for 0..5 {
         print("Iterating: %\n", it);
