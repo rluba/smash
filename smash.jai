@@ -701,18 +701,6 @@ print_instruction :: (inst: Xed_Decoded_Inst, address: u64, is_current_instructi
 
 #scope_file
 
-debugger_logger :: (message: string, data: *void, info: Log_Info) {
-    color := 240;
-    if info.common_flags & .ERROR {
-        color = 1;
-    }
-
-    print("\e[38;5;%m%\e[0;m", color, message);
-
-    if message && (message[message.count-1] != #char "\n") write_string("\n");
-}
-
-
 OPCODE_INT3 :: 0xCC;
 
 formatHex64 :: #bake_arguments formatInt(base = 16, minimum_digits = 16);
@@ -724,5 +712,6 @@ formatHex64 :: #bake_arguments formatInt(base = 16, minimum_digits = 16);
 
 #load "ptrace.jai";
 #load "elf.jai";
+#load "logger.jai";
 #load "termios.jai";
 #load "xed.jai";

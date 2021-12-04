@@ -15,5 +15,6 @@
 /.vscode
 .DS_Store
 /smash
+/smash_server
 /tracee
 /lib/xed/build
