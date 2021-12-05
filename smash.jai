@@ -225,14 +225,14 @@ do_main :: () -> s32 {
                     }
 
                     target.state = .PAUSED;
-                    fetch_registers(*target);
+                    if !fetch_registers(*target)    return 1;
 
                     for target.breakpoints {
                         if it.address == target.registers.rip - 1 {
                             log("We hit breakpoint number %!\n", it_index);
 
                             target.registers.rip -= 1;
-                            set_registers(*target);
+                            if !set_registers(*target)  return 1;
 
                             target.state = .HIT_BREAKPOINT;
                             pending_action = .NOTHING;
@@ -245,7 +245,7 @@ do_main :: () -> s32 {
                     if pending_action == .NOTHING {
                         // log("Target state changed to %\n", target.state);
 
-                        fetch_fp_registers(*target);
+                        if !fetch_fp_registers(*target)     return 1;
                         print_registers(*target);
 
                         rip := target.registers.rip;
@@ -281,6 +281,15 @@ do_main :: () -> s32 {
                         signal := WTERMSIG(status);
                         signal_string := to_string(strsignal(signal));
                         log_error("Target was terminated by signal % (%).\n", signal, signal_string);
+                        success, info := fetch_signal_info(*target);
+                        if !success     return 1;
+                        print("Signal details: %\n", info);
+                        if info.signo == {
+                            case SIGSEGV;
+                                print("Segfault! Code % – %\n", cast(Si_Code_Sigsegv) info.code, info.fields.sigfault);
+                        }
+                        if !fetch_registers(*target)   return 1;
+                        print_registers(*target);
                         break;
                     }
                     log_error("Something unexpected happened in the target process: %\n", status);
@@ -480,6 +489,18 @@ print_registers :: (using target: *Target) {
     log("Registers: %\n", registers);
     // log("FP Registers: %\n", fp_registers);
 }
+
+fetch_signal_info :: (using target: *Target) -> success: bool, result: Siginfo {
+    info: Siginfo;
+    result := ptrace(.GETSIGINFO, pid, null, *info);
+    if result != 0 {
+        log_error("Could not get signal info. .GETSIGINFO failed with errno %\n", errno());
+        return false, info;
+    }
+
+    return true, info;
+}
+
 
 spawn_target_process :: (cmd: [] string, working_directory: string) -> success: bool, pid: pid_t, output_pipe: s32, error_pipe: s32 {
     output_pipes        : [2] s32;
