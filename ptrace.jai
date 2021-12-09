@@ -231,79 +231,76 @@ Ptrace_Request :: __ptrace_request;
         gs:       u64;
     }
 
-    SIG_MAX_SIZE :: 128;
-    SIGINFO_PAD_SIZE :: (SIG_MAX_SIZE / size_of(s32)) - 4;
-
     __pid_t :: s32;
     __uid_t :: u32;
     __clock_t :: s64;
 
     Siginfo :: siginfo_t;
-    siginfo_t :: struct {
-        signo: s32;		/* Signal number.  */
-        errno: s32;		/* If non-zero, an errno value associated with this signal, as defined in <errno.h>.  */
-        code: s32;
-        pad0: s32;       /* Explicit padding.  */
+    // siginfo_t :: struct {
+    //     signo: s32;		/* Signal number.  */
+    //     errno: s32;		/* If non-zero, an errno value associated with this signal, as defined in <errno.h>.  */
+    //     code: s32;
+    //     pad0: s32;       /* Explicit padding.  */
 
-        fields: union {
-            pad: [SIGINFO_PAD_SIZE] s32;
-            /* kill().  */
-            kill: struct {
-                pid: __pid_t;	/* Sending process ID.  */
-                uid: __uid_t;	/* Real user ID of sending process.  */
-            }
-            /* POSIX.1b timers.  */
-            timer: struct {
-                tid: s32;		/* Timer ID.  */
-                overrun: s32;	/* Overrun count.  */
-                sigval: Sigval;	/* Signal value.  */
-            }
+    //     fields: union {
+    //         pad: [SIGINFO_PAD_SIZE] s32;
+    //         /* kill().  */
+    //         kill: struct {
+    //             pid: __pid_t;	/* Sending process ID.  */
+    //             uid: __uid_t;	/* Real user ID of sending process.  */
+    //         }
+    //         /* POSIX.1b timers.  */
+    //         timer: struct {
+    //             tid: s32;		/* Timer ID.  */
+    //             overrun: s32;	/* Overrun count.  */
+    //             sigval: Sigval;	/* Signal value.  */
+    //         }
 
-            /* POSIX.1b signals.  */
-            rt: struct {
-                pid: __pid_t;	/* Sending process ID.  */
-                uid: __uid_t;	/* Real user ID of sending process.  */
-                sigval: Sigval;	/* Signal value.  */
-            }
+    //         /* POSIX.1b signals.  */
+    //         rt: struct {
+    //             pid: __pid_t;	/* Sending process ID.  */
+    //             uid: __uid_t;	/* Real user ID of sending process.  */
+    //             sigval: Sigval;	/* Signal value.  */
+    //         }
 
-            /* SIGCHLD.  */
-            sigchild: struct {
-                pid: __pid_t;	/* Which child.	 */
-                uid: __uid_t;	/* Real user ID of sending process.  */
-                status: s32;	/* Exit value or signal.  */
-                utime: __clock_t;
-                stime: __clock_t;
-            }
+    //         /* SIGCHLD.  */
+    //         sigchild: struct {
+    //             pid: __pid_t;	/* Which child.	 */
+    //             uid: __uid_t;	/* Real user ID of sending process.  */
+    //             status: s32;	/* Exit value or signal.  */
+    //             utime: __clock_t;
+    //             stime: __clock_t;
+    //         }
 
-            /* SIGILL, SIGFPE, SIGSEGV, SIGBUS.  */
-            sigfault: struct {
-                _addr: *void;	    /* Faulting insn/memory ref.  */
-                addr_lsb: s16;  /* Valid LSB of the reported address.  */
-                bounds: union {
-                    /* used when code=SEGV_BNDERR */
-                    addr_bnd: struct {
-                        lower: *void;
-                        upper: *void;
-                    }
-                    /* used when code=SEGV_PKUERR */
-                    _pkey: u32;
-                }
-            }
+    //         /* SIGILL, SIGFPE, SIGSEGV, SIGBUS.  */
+    //         sigfault: struct {
+    //             _addr: *void;	    /* Faulting insn/memory ref.  */
+    //             addr_lsb: s16;  /* Valid LSB of the reported address.  */
+    //             bounds: union {
+    //                 /* used when code=SEGV_BNDERR */
+    //                 addr_bnd: struct {
+    //                     lower: *void;
+    //                     upper: *void;
+    //                 }
+    //                 /* used when code=SEGV_PKUERR */
+    //                 _pkey: u32;
+    //             }
+    //         }
 
-            /* SIGPOLL.  */
-            sigpoll: struct {
-                band: s64;	/* Band event for SIGPOLL.  */
-                fd: s32;
-            }
+    //         /* SIGPOLL.  */
+    //         sigpoll: struct {
+    //             band: s64;	/* Band event for SIGPOLL.  */
+    //             fd: s32;
+    //         }
 
-            /* SIGSYS.  */
-            sigsys: struct {
-                call_addr: *void;	/* Calling user insn.  */
-                syscall: s32;	/* Triggering system call number.  */
-                arch: u32; /* AUDIT_ARCH_* of syscall.  */
-            }
-        }
-    }
+    //         /* SIGSYS.  */
+    //         sigsys: struct {
+    //             call_addr: *void;	/* Calling user insn.  */
+    //             syscall: s32;	/* Triggering system call number.  */
+    //             arch: u32; /* AUDIT_ARCH_* of syscall.  */
+    //         }
+    //     }
+    // }
 
     Si_Code :: enum {
         SI_ASYNCNL :: -60;	// Sent by asynch name lookup completion. 
@@ -391,10 +388,10 @@ Ptrace_Request :: __ptrace_request;
     }
 
     Sigval :: sigval_t;
-    sigval_t :: union {
-        sival_int: s32;
-        sival_ptr: *void;
-    }
+    // sigval_t :: union {
+    //     sival_int: s32;
+    //     sival_ptr: *void;
+    // }
 }
 
 #scope_file

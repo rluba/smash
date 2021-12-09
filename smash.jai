@@ -74,6 +74,8 @@ do_main :: () -> s32 {
         return 1;
     }
 
+    parse_debug_info(*elf);
+
     xed_tables_init();
     format_options: Xed_Format_Options;
     xed_format_set_options(format_options);
@@ -284,12 +286,13 @@ do_main :: () -> s32 {
                         success, info := fetch_signal_info(*target);
                         if !success     return 1;
                         print("Signal details: %\n", info);
-                        if info.signo == {
+                        if info.si_signo == {
                             case SIGSEGV;
-                                print("Segfault! Code % – %\n", cast(Si_Code_Sigsegv) info.code, info.fields.sigfault);
+                                print("Segfault! Code % – %\n", cast(Si_Code_Sigsegv) info.si_code, info._sigfault);
                         }
                         if !fetch_registers(*target)   return 1;
                         print_registers(*target);
+                        
                         break;
                     }
                     log_error("Something unexpected happened in the target process: %\n", status);
@@ -719,20 +722,23 @@ print_instruction :: (inst: Xed_Decoded_Inst, address: u64, is_current_instructi
     return true;
 }
 
+#scope_module 
+
+formatHex64 :: #bake_arguments formatInt(base = 16, minimum_digits = 16);
 
 #scope_file
 
 OPCODE_INT3 :: 0xCC;
 
-formatHex64 :: #bake_arguments formatInt(base = 16, minimum_digits = 16);
 
 #import "Basic";
 #import "POSIX";
 #import "Command_Line";
 #import "String";
 
-#load "ptrace.jai";
+#load "dwarf.jai";
 #load "elf.jai";
 #load "logger.jai";
+#load "ptrace.jai";
 #load "termios.jai";
 #load "xed.jai";

@@ -6,6 +6,9 @@ Elf :: struct {
     section_names: string;
 
     text_section: *Elf_Section_Header;
+    debug_info_section: *Elf_Section_Header;
+    debug_abbrev_section: *Elf_Section_Header;
+    debug_str_section: *Elf_Section_Header;
     debug_line_section: *Elf_Section_Header;
     text: [] u8;
 }
@@ -188,6 +191,9 @@ read_target_program :: (path: string) -> success: bool, elf: Elf  {
     elf.section_names.count = cast (s64) names_section.size;
 
     elf.text_section = null;
+    elf.debug_info_section = null;
+    elf.debug_abbrev_section = null;
+    elf.debug_str_section = null;
     elf.debug_line_section = null;
     for * elf.sections {
         print("Section header %: %\n", it_index, <<it);
@@ -200,6 +206,39 @@ read_target_program :: (path: string) -> success: bool, elf: Elf  {
         // @Stability: this doesn’t check for overflows!
         section_name := to_string(section_names.data + it.name_offset);
         print("Section name: %\n", section_name);
+        if section_name == ".debug_info" {
+            if it.type != .PROGBITS {
+                log_error("Invalid debug info section at %: %\n", it_index, <<it);
+                return false, elf;
+            }
+            if elf.debug_info_section {
+                log_error("Found another debug info section at %\n", it_index);
+                return false, elf;
+            }
+            elf.debug_info_section = it;
+        }
+        if section_name == ".debug_abbrev" {
+            if it.type != .PROGBITS {
+                log_error("Invalid debug abbrev section at %: %\n", it_index, <<it);
+                return false, elf;
+            }
+            if elf.debug_abbrev_section {
+                log_error("Found another debug abbrev section at %\n", it_index);
+                return false, elf;
+            }
+            elf.debug_abbrev_section = it;
+        }
+        if section_name == ".debug_str" {
+            if it.type != .PROGBITS {
+                log_error("Invalid debug str section at %: %\n", it_index, <<it);
+                return false, elf;
+            }
+            if elf.debug_str_section {
+                log_error("Found another str line section at %\n", it_index);
+                return false, elf;
+            }
+            elf.debug_str_section = it;
+        }
         if section_name == ".debug_line" {
             if it.type != .PROGBITS {
                 log_error("Invalid debug line section at %: %\n", it_index, <<it);
@@ -245,6 +284,13 @@ validate_section_header :: (section_header: *Elf_Section_Header, file_size: s64)
     }
 
     return true;
+}
+
+get_section_data :: (elf: *Elf, section: *Elf_Section_Header) -> [] u8 {
+    result: [] u8 = ---;
+    result.data = elf.content.data + section.offset;
+    result.count = xx section.size;
+    return result;
 }
 
 #scope_file

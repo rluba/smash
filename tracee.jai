@@ -6,12 +6,15 @@ main :: () {
         print("Iterating: %\n", it);
     }
     print("crashing…\n");
+    // // Crashing by null function pointer.
     // fn: #type () -> int = xx cast(*void) 5;
     // fn();
-    arr: [] int;
-    arr.data = xx 5;
-    arr.count = 1;
-    x := arr[0];
+
+    // Crashing by memory dereferencing
+    // arr: [] int;
+    // arr.data = xx 5;
+    // arr.count = 1;
+    // x := arr[0];
     print("DONE\n");
 }
 
