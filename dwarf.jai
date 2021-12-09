@@ -35,8 +35,8 @@ parse_debug_info :: (elf: *Elf) -> success: bool {
         return false;
     }
 
-    debug_info := get_section_data(elf, elf.debug_info_section);
-    abbrev := get_section_data(elf, elf.debug_abbrev_section);
+    debug_info := get_section_data(<<elf, elf.debug_info_section);
+    abbrev := get_section_data(<<elf, elf.debug_abbrev_section);
 
     offset := 0;
     while offset < debug_info.count {
@@ -67,7 +67,7 @@ parse_debug_info :: (elf: *Elf) -> success: bool {
         cu: [] u8 = ---;
         cu.data = debug_info.data + offset + size_of(Compliation_Unit_Header_32);
         cu.count = header.size;
-        parse_compilation_unit(elf, cu, abbreviations);
+        parse_compilation_unit(<<elf, cu, abbreviations);
 
         offset = cu_end;
     }
@@ -75,7 +75,7 @@ parse_debug_info :: (elf: *Elf) -> success: bool {
     return true;
 }
 
-Dwarf_Abbreviations :: struct {
+Dwarf_Abbreviation_List :: struct {
     ids: [..] u64;
     values: [..] Dwarf_Abbreviation;
 }
@@ -88,11 +88,11 @@ Dwarf_Abbreviation :: struct {
 
 Dwarf_Attribute :: struct {
     type: Dwarf_Attribute_Type;
-    form: Dwarf_Attribute_Form;
+    format: Dwarf_Attribute_Format;
 }
 
-parse_abbreviations :: (abbrev_data: [] u8, offset_in: u64) -> Dwarf_Abbreviations, success: bool {
-    abbreviations: Dwarf_Abbreviations;
+parse_abbreviations :: (abbrev_data: [] u8, offset_in: u64) -> Dwarf_Abbreviation_List, success: bool {
+    abbreviations: Dwarf_Abbreviation_List;
     offset := cast(s64) offset_in;
     while offset < abbrev_data.count {
         id: u64 = ---;
@@ -115,18 +115,18 @@ parse_abbreviations :: (abbrev_data: [] u8, offset_in: u64) -> Dwarf_Abbreviatio
 
         while true {
             type: u64 = ---;
-            form: u64 = ---;
+            format: u64 = ---;
             type, offset, success = parse_uleb128(abbrev_data, offset);
             if !success     return .{}, false;
 
-            form, offset, success = parse_uleb128(abbrev_data, offset);
+            format, offset, success = parse_uleb128(abbrev_data, offset);
             if !success     return .{}, false;
 
-            if type == 0 && form == 0   break;
+            if type == 0 && format == 0   break;
 
             attribute: Dwarf_Attribute;
             attribute.type = xx type;
-            attribute.form = xx form;
+            attribute.format = xx format;
             // log("Found attribute %\n", attribute);
             array_add(*abbrev.attributes, attribute);
         }
@@ -141,7 +141,7 @@ parse_abbreviations :: (abbrev_data: [] u8, offset_in: u64) -> Dwarf_Abbreviatio
     return abbreviations, true;
 }
 
-parse_compilation_unit :: (elf: *Elf, data: [] u8, abbrevs: Dwarf_Abbreviations) -> success: bool {
+parse_compilation_unit :: (elf: Elf, data: [] u8, abbrevs: Dwarf_Abbreviation_List) -> success: bool {
     offset := 0;
     cu: Compilation_Unit;
     while true {
@@ -150,20 +150,16 @@ parse_compilation_unit :: (elf: *Elf, data: [] u8, abbrevs: Dwarf_Abbreviations)
         abbrev_id, offset, success = parse_uleb128(data, offset);
         if !success     return false;
 
-        abbrev: *Dwarf_Abbreviation;
-        for abbrevs.ids {
-            if it == abbrev_id   {
-                abbrev = *abbrevs.values[it_index];
-                break;
-            }
-        }
-        if !abbrev {
-            log_error("Could not find abbreviation %\n", abbrev_id);
-            return false;
-        }
+        abbrev := find_abbrev(abbrevs, abbrev_id);
+        if !abbrev  return false;
 
         if abbrev.tag != .COMPILE_UNIT {
             log_error("Unexpected abbreviation: %\n", <<abbrev);
+            return false;
+        }
+
+        if !abbrev.has_children {
+            log_error("Unexpected compile unit withot children: %\n", <<abbrev);
             return false;
         }
 
@@ -172,33 +168,85 @@ parse_compilation_unit :: (elf: *Elf, data: [] u8, abbrevs: Dwarf_Abbreviations)
         for abbrev.attributes {
             if it.type == {
                 case .PRODUCER;
-                    cu.producer, offset, success = parse_string_attribute(elf, it.form, data, offset);
+                    cu.producer, offset, success = parse_string_attribute(elf, it.format, data, offset);
                 case .LANGUAGE;
                     value: u64;
-                    value, offset, success = parse_uint_attribute(elf, it.form, data, offset);
+                    value, offset, success = parse_unsigned_int_attribute(elf, it.format, data, offset);
                     if !success     return false;
                     range_check_and_store(value, type_info(type_of(cu.language)), *cu.language);
                 case .NAME;
-                    cu.name, offset, success = parse_string_attribute(elf, it.form, data, offset);
+                    cu.name, offset, success = parse_string_attribute(elf, it.format, data, offset);
                     if !success     return false;
                 case .STMT_LIST;
-                    cu.statement_list, offset, success = parse_uint_attribute(elf, it.form, data, offset);
+                    cu.statement_list, offset, success = parse_unsigned_int_attribute(elf, it.format, data, offset);
                     if !success     return false;
                 case .LOW_PC;
-                    cu.low_pc, offset, success = parse_uint_attribute(elf, it.form, data, offset);
+                    cu.low_pc, offset, success = parse_unsigned_int_attribute(elf, it.format, data, offset);
                     if !success     return false;
                 case .HIGH_PC;
-                    cu.high_pc, offset, success = parse_uint_attribute(elf, it.form, data, offset);
+                    cu.high_pc, offset, success = parse_unsigned_int_attribute(elf, it.format, data, offset);
                     if !success     return false;
+                    if it.format != .ADDR {
+                        if !cu.low_pc {
+                            log_error("Parsed a relative high_pc before finding a low_pc. That’s technically legal but not yet supported.\n");
+                            return false;
+                        }
+                        cu.high_pc += cu.low_pc;
+                    }
                 case;
-                    offset, success = skip_attribute(elf, it.form, data, offset);
+                    offset, success = skip_attribute(elf, it.format, data, offset);
                     if !success     return false;
             }
+        }
+        done := false;
+        while !done {
+            done, offset, success = parse_debug_info_entry(elf, data, offset, abbrevs);
+            if !success     return false;
         }
         log("Compilation unit: %\n", cu);
         break; // For now
     }
     return true;
+}
+
+parse_debug_info_entry :: (elf: Elf, data: [] u8, offset_in: s64, abbrevs: Dwarf_Abbreviation_List) -> done: bool, offset: s64, success: bool {
+    abbrev_id, offset, success := parse_uleb128(data, offset_in);
+    if !success     return false, offset, false;
+
+    if abbrev_id == 0   return true, offset, true;
+
+    abbrev := find_abbrev(abbrevs, abbrev_id);
+    if !abbrev  return false, offset, false;
+
+    log("Parsing abbrev: %\n", <<abbrev);
+
+    for abbrev.attributes {
+        offset, success = skip_attribute(elf, it.format, data, offset);
+        if !success     return false, offset, false;
+    }
+
+    if abbrev.has_children {
+        log("Parsing children\n");
+        done := false;
+        while !done {
+            done, offset, success = parse_debug_info_entry(elf, data, offset, abbrevs);
+            if !success     return false, offset, false;
+        }
+        log("Done parsing children\n");
+    }
+
+    return false, offset, true;
+}
+
+find_abbrev :: (abbrevs: Dwarf_Abbreviation_List, id: u64) -> *Dwarf_Abbreviation {
+    for abbrevs.ids {
+        if it == id   {
+            return *abbrevs.values[it_index];
+        }
+    }
+
+    log_error("Could not find abbreviation %\n", id);
+    return null;
 }
 
 parse_uleb128 :: (data: [] u8, offset_in: s64) -> value: u64, len: int, success: bool {
@@ -222,8 +270,35 @@ parse_uleb128 :: (data: [] u8, offset_in: s64) -> value: u64, len: int, success:
     return result, offset, true;
 }
 
-parse_string_attribute :: (elf: *Elf, form: Dwarf_Attribute_Form, data: [] u8, offset: s64) -> result: string, offset: s64, success: bool {
-    if form == {
+parse_sleb128 :: (data: [] u8, offset_in: s64) -> value: s64, len: int, success: bool {
+    result: s64;
+    shift := 0;
+
+    offset := offset_in;
+    while true {
+        if offset == data.count {
+            log_error("Unexpected end at offset % while decoding a ULEB128 value\n", offset);
+            return 0, 0, false;
+        }
+
+        byte := data[offset];
+        result |= ((cast(s64) byte & 0x7F) << shift);
+        offset += 1;
+        if !(byte & 0x80) {
+            if shift < size_of(s64) && (byte & 0x40) {
+                // sign extend
+                result |= - (1 << shift);
+            }
+            break;
+        }
+        shift += 7;
+    }
+
+    return result, offset, true;
+}
+
+parse_string_attribute :: (elf: Elf, format: Dwarf_Attribute_Format, data: [] u8, offset: s64) -> result: string, offset: s64, success: bool {
+    if format == {
         case .STRING;
             str, success := get_c_string_from_data(data, offset);
             if !success return "", offset, false;
@@ -239,29 +314,37 @@ parse_string_attribute :: (elf: *Elf, form: Dwarf_Attribute_Form, data: [] u8, o
             return str, end_offset, success;
 
         case;
-            log_error("Unsupported string attribute format: %\n", form);
+            log_error("Unsupported string attribute format: %\n", format);
             return "", offset, false;
     }
 
 }
 
-parse_uint_attribute :: (elf: *Elf, form: Dwarf_Attribute_Form, data: [] u8, offset: s64) -> result: u64, offset: s64, success: bool {
-    if form == {
-        case .FLAG; #through;
+parse_unsigned_int_attribute :: (elf: Elf, format: Dwarf_Attribute_Format, data: [] u8, offset: s64) -> result: u64, offset: s64, success: bool {
+    if format == {
+        case .REF1; #through;
         case .DATA1;
             result, end_offset, success := parse_integer(data, offset, u8);
             return result, end_offset, success;
 
+        case .REF2; #through;
         case .DATA2;
             result, end_offset, success := parse_integer(data, offset, u16);
             return result, end_offset, success;
 
+        case .REF4; #through;
         case .DATA4;
             result, end_offset, success := parse_integer(data, offset, u32);
             return result, end_offset, success;
 
+        case .REF8; #through;
         case .DATA8;
             result, end_offset, success := parse_integer(data, offset, u64);
+            return result, end_offset, success;
+
+        case .REF_UDATA; #through;
+        case .UDATA; 
+            result, end_offset, success := parse_uleb128(data, offset);
             return result, end_offset, success;
 
         case .SEC_OFFSET;
@@ -273,13 +356,51 @@ parse_uint_attribute :: (elf: *Elf, form: Dwarf_Attribute_Form, data: [] u8, off
             result, end_offset, success := parse_integer(data, offset, u64);
             return result, end_offset, success;
 
+        case .FLAG;
+            result, end_offset, success := parse_integer(data, offset, u8);
+            return result, end_offset, success;
         case .FLAG_PRESENT;
             return 1, offset, true;
         
         case;
-            log_error("Unsupported data attribute format: %\n", form);
+            log_error("Unsupported data attribute format: %\n", format);
             return 0, offset, false;
     }
+}
+
+parse_signed_int_attribute :: (elf: Elf, format: Dwarf_Attribute_Format, data: [] u8, offset: s64) -> result: s64, offset: s64, success: bool {
+    if format == {
+        case .SDATA; 
+            result, end_offset, success := parse_sleb128(data, offset);
+            return result, end_offset, success;
+        case;
+            log_error("Unsupported data attribute format: %\n", format);
+            return 0, offset, false;
+    }
+}
+
+parse_length_block :: (elf: Elf, format: Dwarf_Attribute_Format, data: [] u8, offset_in: s64) -> result: [] u8, offset: s64, success: bool {
+    length: u64 = ---;
+    offset: s64 = ---;
+    success: bool = ---;
+    if format == {
+        case .BLOCK1;
+            length, offset, success = parse_integer(data, offset_in, u8);
+        case .BLOCK2;
+            length, offset, success = parse_integer(data, offset_in, u16);
+        case .BLOCK4;
+            length, offset, success = parse_integer(data, offset_in, u32);
+        case .BLOCK;
+            length, offset, success = parse_uleb128(data, offset_in);
+    }
+
+    end := offset + cast (s64) length;
+    if end > data.count {
+        log_error("Block length went out of bounds: %\n", length);
+        return .[], offset, false;
+    }
+
+    return array_view(data, offset, xx length), end, true;
 }
 
 parse_integer :: (data: [] u8, offset: s64, $T: Type) -> value: T, offset: s64, success: bool {
@@ -292,24 +413,40 @@ parse_integer :: (data: [] u8, offset: s64, $T: Type) -> value: T, offset: s64, 
     return value, end_offset, true;
 }
 
-skip_attribute :: (elf: *Elf, form: Dwarf_Attribute_Form, data: [] u8, offset_in: s64) -> offset: s64, success: bool {
-    if form == {
+skip_attribute :: (elf: Elf, format: Dwarf_Attribute_Format, data: [] u8, offset_in: s64) -> offset: s64, success: bool {
+    if format == {
         case .STRING; #through;
         case .STRP;
-            str, offset, success := parse_string_attribute(elf, form, data, offset_in);
+            str, offset, success := parse_string_attribute(elf, format, data, offset_in);
             return offset, success;
         case .DATA1; #through;
         case .DATA2; #through;
         case .DATA4; #through;
         case .DATA8; #through;
+        case .UDATA; #through;
+        case .REF1; #through;
+        case .REF2; #through;
+        case .REF4; #through;
+        case .REF8; #through;
+        case .REF_UDATA; #through;
         case .SEC_OFFSET; #through; 
         case .ADDR; #through;
         case .FLAG; #through;
         case .FLAG_PRESENT;
-            value, offset, success := parse_uint_attribute(elf, form, data, offset_in);
+            value, offset, success := parse_unsigned_int_attribute(elf, format, data, offset_in);
+            return offset, success;
+        case .SDATA;
+            value, offset, success := parse_signed_int_attribute(elf, format, data, offset_in);
+            return offset, success;
+        case .BLOCK1; #through;
+        case .BLOCK2; #through;
+        case .BLOCK4; #through;
+        case .BLOCK; #through;
+        case .EXPRLOC;
+            value, offset, success := parse_length_block(elf, format, data, offset_in);
             return offset, success;
         case;
-            log_error("Couldn’t skip over unsupported attribute format: %\n", form);
+            log_error("Couldn’t skip over unsupported attribute format: %\n", format);
             return offset_in, false;
     }
 }
@@ -375,7 +512,7 @@ unsigned_integer_range_from_size :: (size_in_bytes: int) -> (low: u64, high: u64
 	return 0, high;
 }
 
-get_debug_string :: (elf: *Elf, offset: u64) -> result: string, success: bool {
+get_debug_string :: (elf: Elf, offset: u64) -> result: string, success: bool {
     if !elf.debug_str_section                   return "", false;
 
     if offset >= elf.debug_str_section.size {

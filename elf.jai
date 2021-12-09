@@ -286,7 +286,7 @@ validate_section_header :: (section_header: *Elf_Section_Header, file_size: s64)
     return true;
 }
 
-get_section_data :: (elf: *Elf, section: *Elf_Section_Header) -> [] u8 {
+get_section_data :: (elf: Elf, section: *Elf_Section_Header) -> [] u8 {
     result: [] u8 = ---;
     result.data = elf.content.data + section.offset;
     result.count = xx section.size;
