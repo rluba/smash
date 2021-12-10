@@ -507,7 +507,7 @@ print_source :: (using target: *Target, source_display: Source_Display) -> succe
                 end := Min(rip_instruction_index + 5, instructions.count - 1);
                 for start..end {
                     inst := *instructions[it];
-                    success := print_instruction(<<inst, target.registers.rip, it == rip_instruction_index);
+                    success := print_instruction(<<inst, instruction_addresses[it], it == rip_instruction_index);
                     if !success {
                         log_error("Could not print instruction at %\n", formatHex64(instruction_addresses[it]));
                         return false;

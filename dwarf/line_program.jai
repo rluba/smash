@@ -205,10 +205,10 @@ decode_line_info :: (elf: Elf, data: [] u8) -> Line_Info, success: bool {
 
     // log("Line info: %\n", info);
 
-    log("Line table:\n");
-    for info.addresses {
-        log("\t0x%: %\n", formatHex64(it), info.mappings[it_index]);
-    }
+    // log("Line table:\n");
+    // for info.addresses {
+    //     log("\t0x%: %\n", formatHex64(it), info.mappings[it_index]);
+    // }
 
 
     return info, true;

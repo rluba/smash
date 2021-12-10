@@ -129,7 +129,7 @@ read_target_program :: (path: string) -> success: bool, elf: Elf  {
     }
 
     elf.header = cast(*Elf_Header) elf.content.data;
-    print("ELF header: %\n", <<header);
+    // log("ELF header: %\n", <<header);
 
     if header.ident.magic != EXPECTED_MAGIC {
         log_error("File does not appear to be a ELF binary: %", path);
@@ -196,16 +196,16 @@ read_target_program :: (path: string) -> success: bool, elf: Elf  {
     elf.debug_str_section = null;
     elf.debug_line_section = null;
     for * elf.sections {
-        print("Section header %: %\n", it_index, <<it);
+        // log("Section header %: %\n", it_index, <<it);
         if !validate_section_header(it, elf.content.count)     return false, elf;
         if it.name_offset > section_names.count {
-            print("Invalid section name offset: %\n", it.name_offset);
+            log_error("Invalid section name offset: %\n", it.name_offset);
             return false, elf;
         }
 
         // @Stability: this doesn’t check for overflows!
         section_name := to_string(section_names.data + it.name_offset);
-        print("Section name: %\n", section_name);
+        // log("Section name: %\n", section_name);
         if section_name == ".debug_info" {
             if it.type != .PROGBITS {
                 log_error("Invalid debug info section at %: %\n", it_index, <<it);
@@ -266,8 +266,8 @@ read_target_program :: (path: string) -> success: bool, elf: Elf  {
         }
     }
 
-    print("Text section: %\n", << elf.text_section);
-    print("Debug line section: %\n", << elf.debug_line_section);
+    // log("Text section: %\n", << elf.text_section);
+    // log("Debug line section: %\n", << elf.debug_line_section);
 
     if !elf.text_section {
         log_error("Could not find text section\n");

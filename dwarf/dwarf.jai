@@ -61,7 +61,7 @@ parse_debug_info :: (elf: *Elf) -> Debug_Info, success: bool {
             return debug_info, false;
         }
 
-        log("Compilation unit header: %\n", <<header);
+        // log("Compilation unit header: %\n", <<header);
         cu_end := offset + header.size + size_of(type_of(header.size));
         if cu_end > debug_info_data.count {
             log_error("Invalid compilation unit size: %\n", header.size);
@@ -155,7 +155,7 @@ parse_abbreviations :: (abbrev_data: [] u8, offset_in: u64) -> Dwarf_Abbreviatio
         array_add(*abbreviations.ids, id);
         array_add(*abbreviations.values, abbrev);
     }
-    log("Found % abbreviations\n", abbreviations.ids.count);
+    // log("Found % abbreviations\n", abbreviations.ids.count);
 
     return abbreviations, true;
 }
@@ -181,7 +181,7 @@ parse_compilation_unit :: (elf: Elf, data: [] u8, abbrevs: Dwarf_Abbreviation_Li
         return cu, false;
     }
 
-    log("CU abbrev: %\n", <<abbrev);
+    // log("CU abbrev: %\n", <<abbrev);
 
     for abbrev.attributes {
         if it.type == {
@@ -228,7 +228,7 @@ parse_compilation_unit :: (elf: Elf, data: [] u8, abbrevs: Dwarf_Abbreviation_Li
         return cu, false;
     }
 
-    log("Compilation unit: %\n", cu);
+    // log("Compilation unit: %\n", cu);
 
     return cu, true;
 }
@@ -242,7 +242,7 @@ parse_debug_info_entry :: (elf: Elf, data: [] u8, offset_in: s64, abbrevs: Dwarf
     abbrev := find_abbrev(abbrevs, abbrev_id);
     if !abbrev  return false, offset, false;
 
-    log("Parsing abbrev: %\n", <<abbrev);
+    // log("Parsing abbrev: %\n", <<abbrev);
 
     for abbrev.attributes {
         offset, success = skip_attribute(elf, it.format, data, offset);
@@ -250,13 +250,13 @@ parse_debug_info_entry :: (elf: Elf, data: [] u8, offset_in: s64, abbrevs: Dwarf
     }
 
     if abbrev.has_children {
-        log("Parsing children\n");
+        // log("Parsing children\n");
         done := false;
         while !done {
             done, offset, success = parse_debug_info_entry(elf, data, offset, abbrevs);
             if !success     return false, offset, false;
         }
-        log("Done parsing children\n");
+        // log("Done parsing children\n");
     }
 
     return false, offset, true;
@@ -561,7 +561,7 @@ get_c_string_from_data :: (data: [] u8, offset: s64) -> result: string, success:
         return "", false;
     }
 
-    log("Found string \"%\"\n", str);
+    // log("Found string \"%\"\n", str);
 
     return str, true;
 }
