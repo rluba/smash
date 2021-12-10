@@ -15,70 +15,78 @@ Compliation_Unit_Header_64 :: struct {
 } #no_padding;
 #run assert(size_of(Compliation_Unit_Header_64) == 23, "Invalid compilation unit header size");
 
+Debug_Info :: struct {
+    compilation_units: [..] Compilation_Unit;
+}
+
 Compilation_Unit :: struct {
     producer: string;
     language: u16; // could be a u16, but then our parse function needs to be smarter.
     name: string;
-    statement_list: u64;
+    statement_list: u64; // Could be removed, we only need it until we’ve parsed the line info.
     low_pc: u64;
     high_pc: u64;
+    line_info: Line_Info;
 }
 
-parse_debug_info :: (elf: *Elf) -> success: bool {
+parse_debug_info :: (elf: *Elf) -> Debug_Info, success: bool {
+    debug_info: Debug_Info;
     if !elf.debug_info_section {
         log_error("This elf does not include a .debug_info section");
-        return false;
+        return debug_info, false;
     }
 
     if !elf.debug_abbrev_section {
         log_error("This elf does not include a .debug_abbrev section");
-        return false;
+        return debug_info, false;
     }
 
-    debug_info := get_section_data(<<elf, elf.debug_info_section);
+    debug_info_data := get_section_data(<<elf, elf.debug_info_section);
     abbrev := get_section_data(<<elf, elf.debug_abbrev_section);
     line_programs := get_section_data(<<elf, elf.debug_line_section);
 
     offset := 0;
-    while offset < debug_info.count {
-        header := cast (*Compliation_Unit_Header_32) (debug_info.data + offset);
+    while offset < debug_info_data.count {
+        header := cast (*Compliation_Unit_Header_32) (debug_info_data.data + offset);
         if header.size == 0xffff_ffff {
             log_error("We dont support 64 bit DWARF format yet.");
-            return false;
+            return debug_info, false;
         }
         if header.version != 4 {
             log_error("Compilation unit has unsupported DWARF version: %\n", header.version);
-            return false;
+            return debug_info, false;
         }
         if header.address_size != 8 {
             log_error("Compilation unit has unexpected address_size: %\n", header.address_size);
-            return false;
+            return debug_info, false;
         }
 
         log("Compilation unit header: %\n", <<header);
         cu_end := offset + header.size + size_of(type_of(header.size));
-        if cu_end > debug_info.count {
+        if cu_end > debug_info_data.count {
             log_error("Invalid compilation unit size: %\n", header.size);
-            return false;
+            return debug_info, false;
         }
 
         abbreviations, success := parse_abbreviations(abbrev, header.debug_abbrev_offset);
-        if !success     return false;
+        if !success     return debug_info, false;
 
         cu_start := offset + size_of(Compliation_Unit_Header_32);
-        cu_data := array_view(debug_info, cu_start, cu_end - cu_start);
+        cu_data := array_view(debug_info_data, cu_start, cu_end - cu_start);
         cu: Compilation_Unit = ---;
         cu, success = parse_compilation_unit(<<elf, cu_data, abbreviations);
-        if !success     return false;
+        if !success     return debug_info, false;
 
         statement_list_data := array_view(line_programs, xx cu.statement_list);
-        line_info: Line_Info = ---;
-        line_info, success = parse_line_program(<<elf, statement_list_data);
+        cu.line_info, success = decode_line_info(<<elf, statement_list_data);
+        if !success     return debug_info, false;
+
+        array_add(*debug_info.compilation_units, cu);
 
         offset = cu_end;
     }
 
-    return true;
+    return debug_info, true;
 }
 
 Dwarf_Abbreviation_List :: struct {

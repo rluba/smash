@@ -6,7 +6,7 @@ Line_Info :: struct {
 }
 
 File_Info :: struct {
-    dir_index: u64;
+    dir_id: u64;
     path: string;
 }
 
@@ -29,7 +29,7 @@ Line_Program_Header :: struct {
     opcode_base: u8;
 } #no_padding;
 
-parse_line_program :: (elf: Elf, data: [] u8) -> Line_Info, success: bool {
+decode_line_info :: (elf: Elf, data: [] u8) -> Line_Info, success: bool {
     info: Line_Info;
 
     header := cast(*Line_Program_Header) data.data;
@@ -81,7 +81,7 @@ parse_line_program :: (elf: Elf, data: [] u8) -> Line_Info, success: bool {
     success: bool = ---;
     while true {
         file: File_Info = ---;
-        file, offset, success = parse_file_info(data, offset, stop_at_zero = true);
+        file, offset, success = parse_file_info(info, data, offset, stop_at_zero = true);
         if !success     return info, false;
 
         if !file.path   break;
@@ -125,7 +125,7 @@ parse_line_program :: (elf: Elf, data: [] u8) -> Line_Info, success: bool {
 
                         case .DEFINE_FILE;
                             file: File_Info = ---;
-                            file, offset, success = parse_file_info(data, offset, stop_at_zero = false);
+                            file, offset, success = parse_file_info(info, data, offset, stop_at_zero = false);
                             if !success     return info, false;
 
                             array_add(*info.files, file);
@@ -214,7 +214,7 @@ parse_line_program :: (elf: Elf, data: [] u8) -> Line_Info, success: bool {
     return info, true;
 }
 
-parse_file_info :: (data: [] u8, offset_in: s64, stop_at_zero: bool) -> File_Info, offset: s64, success: bool {
+parse_file_info :: (info: Line_Info, data: [] u8, offset_in: s64, stop_at_zero: bool) -> File_Info, offset: s64, success: bool {
     offset := offset_in;
     file: File_Info = ---;
     success: bool = ---;
@@ -226,8 +226,12 @@ parse_file_info :: (data: [] u8, offset_in: s64, stop_at_zero: bool) -> File_Inf
         return file, offset, true;
     }
 
-    file.dir_index, offset, success = parse_uleb128(data, offset);
+    file.dir_id, offset, success = parse_uleb128(data, offset);
     if !success     return file, offset, false;
+    if xx file.dir_id > info.dirs.count {
+        log_error("File’s dir ID is out of bounds: %\n", file.dir_id);
+        return file, offset, false;
+    }
 
     mod_time: u64 = ---;
     mod_time, offset, success = parse_uleb128(data, offset);

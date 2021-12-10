@@ -74,22 +74,22 @@ do_main :: () -> s32 {
         return 1;
     }
 
-    parse_debug_info(*elf);
+    target: Target;
+
+    target.debug_info = parse_debug_info(*elf);
 
     xed_tables_init();
     format_options: Xed_Format_Options;
     xed_format_set_options(format_options);
 
-    instruction_addresses: [..] u64;
-    instructions: [..] Xed_Decoded_Inst;
     {
-        array_reserve(*instruction_addresses, elf.text.count / 5);
-        array_reserve(*instructions, elf.text.count / 5);
+        array_reserve(*target.instruction_addresses, elf.text.count / 5);
+        array_reserve(*target.instructions, elf.text.count / 5);
         offset := 0;
         while offset < elf.text.count {
             address := elf.text_section.address + cast (u64) offset;
-            array_add(*instruction_addresses, address);
-            inst := array_add(*instructions);
+            array_add(*target.instruction_addresses, address);
+            inst := array_add(*target.instructions);
             success := decode_instruction(*elf, offset, inst);
             if !success {
                 log_error("Could not decode instruction at 0x%\n", formatHex64(address));
@@ -103,7 +103,6 @@ do_main :: () -> s32 {
     defer free(command);
     log("Launching %\n", command);
 
-    target: Target;
     success, target.pid, target.output_pipe, target.error_pipe = spawn_target_process(target_args, args.work_dir);
     if !success {
         log_error("Failed to spawn target process!\n");
@@ -167,6 +166,7 @@ do_main :: () -> s32 {
     target_exit_code: s32;
     pending_action := Debugger_Action.NOTHING;
     next_action := Debugger_Action.NOTHING;
+    source_display := Source_Display.DISASSEMBLY;
     while true {
         num_events := poll(poll_fds.data, num_fds, -1);
         success := true;
@@ -186,6 +186,12 @@ do_main :: () -> s32 {
                         next_action = .CONTINUE;
                     case #char "s";
                         next_action = .STEP;
+                    case #char "d";
+                        if source_display == {
+                            case .DISASSEMBLY;  source_display = .SOURCE;
+                            case .SOURCE;       source_display = .DISASSEMBLY;
+                        }
+                        if !print_source(*target, source_display)   return 1;
                 }
                 if next_action != .NOTHING {
                     log("Next action: %\n", next_action);
@@ -249,29 +255,7 @@ do_main :: () -> s32 {
 
                         if !fetch_fp_registers(*target)     return 1;
                         print_registers(*target);
-
-                        rip := target.registers.rip;
-                        rip_instruction_index := -1;
-                        for instruction_addresses {
-                            if rip == it {
-                                rip_instruction_index = it_index;
-                                break;
-                            }
-                        }
-                        if rip_instruction_index == -1 {
-                            log_error("Could not find instruction for RIP %\n", formatHex64(rip));
-                        } else {
-                            start := Max(rip_instruction_index - 5, 0);
-                            end := Min(rip_instruction_index + 5, instructions.count);
-                            for start..end {
-                                inst := *instructions[it];
-                                success = print_instruction(<<inst, target.registers.rip, it == rip_instruction_index);
-                                if !success {
-                                    log_error("Could not print instruction at %\n", formatHex64(instruction_addresses[it]));
-                                    return 1;
-                                }
-                            }
-                        }
+                        if !print_source(*target, source_display)   return 1;
                     }
                 } else {
                     if WIFEXITED(status) {
@@ -336,6 +320,10 @@ Target :: struct {
     fp_registers: User_Fpregs;
 
     temporarily_disabled_breakpoint_index: int = -1;
+
+    instruction_addresses: [..] u64;
+    instructions: [..] Xed_Decoded_Inst;
+    debug_info: Debug_Info;
 }
 
 Target_State :: enum {
@@ -491,6 +479,78 @@ print_registers :: (using target: *Target) {
     log("RIP: %\n", formatHex64(registers.rip));
     log("Registers: %\n", registers);
     // log("FP Registers: %\n", fp_registers);
+}
+
+Source_Display :: enum {
+    DISASSEMBLY;
+    SOURCE;
+}
+
+print_source :: (using target: *Target, source_display: Source_Display) -> success: bool {
+    rip := target.registers.rip;
+    if source_display == {
+        case .DISASSEMBLY;
+            rip_instruction_index := -1;
+            for instruction_addresses {
+                if rip == it {
+                    rip_instruction_index = it_index;
+                    break;
+                }
+            }
+            if rip_instruction_index == -1 {
+                log_error("Could not find instruction for RIP %\n", formatHex64(rip));
+            } else {
+                start := Max(rip_instruction_index - 5, 0);
+                end := Min(rip_instruction_index + 5, instructions.count);
+                for start..end {
+                    inst := *instructions[it];
+                    success := print_instruction(<<inst, target.registers.rip, it == rip_instruction_index);
+                    if !success {
+                        log_error("Could not print instruction at %\n", formatHex64(instruction_addresses[it]));
+                        return false;
+                    }
+                }
+            }
+        case .SOURCE; 
+            cu: *Compilation_Unit;
+            for * debug_info.compilation_units {
+                if rip >= it.low_pc && rip < it.high_pc {
+                    log("Source is from compilation unit %\n", it_index);
+                    cu = it;
+                    break;
+                }
+            }
+            if !cu {
+                log_error("Couldn’t find compilation unit for RIP %\n", formatHex64(rip));
+                return true;
+            }
+            for cu.line_info.addresses {
+                if rip < it {
+                    if it_index == 0 {
+                        log_error("RIP % is not covered by line info\n", formatHex64(rip));
+                        return true;
+                    }
+
+                    mapping := cu.line_info.mappings[it_index - 1];
+                    filename := "(unknown file)";
+                    if mapping.file_id > 0 {
+                        file_info := cu.line_info.files[mapping.file_id - 1];
+                        if file_info.dir_id > 0 {
+                            filename = tprint("%/%", cu.line_info.dirs[file_info.dir_id - 1], file_info.path);
+                        } else {
+                            filename = file_info.path;
+                        }
+                    }
+
+                    log("File: % line: % column: %\n", filename, mapping.line, mapping.column); 
+                    break;
+                }
+            }
+
+
+    }
+
+    return true;
 }
 
 fetch_signal_info :: (using target: *Target) -> success: bool, result: Siginfo {
