@@ -736,7 +736,7 @@ OPCODE_INT3 :: 0xCC;
 #import "Command_Line";
 #import "String";
 
-#load "dwarf.jai";
+#load "dwarf/dwarf.jai";
 #load "elf.jai";
 #load "logger.jai";
 #load "ptrace.jai";

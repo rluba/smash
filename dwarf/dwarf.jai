@@ -37,6 +37,7 @@ parse_debug_info :: (elf: *Elf) -> success: bool {
 
     debug_info := get_section_data(<<elf, elf.debug_info_section);
     abbrev := get_section_data(<<elf, elf.debug_abbrev_section);
+    line_programs := get_section_data(<<elf, elf.debug_line_section);
 
     offset := 0;
     while offset < debug_info.count {
@@ -46,7 +47,7 @@ parse_debug_info :: (elf: *Elf) -> success: bool {
             return false;
         }
         if header.version != 4 {
-            log_error("Compilation unit has unsupported dwarf version: %\n", header.version);
+            log_error("Compilation unit has unsupported DWARF version: %\n", header.version);
             return false;
         }
         if header.address_size != 8 {
@@ -64,10 +65,15 @@ parse_debug_info :: (elf: *Elf) -> success: bool {
         abbreviations, success := parse_abbreviations(abbrev, header.debug_abbrev_offset);
         if !success     return false;
 
-        cu: [] u8 = ---;
-        cu.data = debug_info.data + offset + size_of(Compliation_Unit_Header_32);
-        cu.count = header.size;
-        parse_compilation_unit(<<elf, cu, abbreviations);
+        cu_start := offset + size_of(Compliation_Unit_Header_32);
+        cu_data := array_view(debug_info, cu_start, cu_end - cu_start);
+        cu: Compilation_Unit = ---;
+        cu, success = parse_compilation_unit(<<elf, cu_data, abbreviations);
+        if !success     return false;
+
+        statement_list_data := array_view(line_programs, xx cu.statement_list);
+        line_info: Line_Info = ---;
+        line_info, success = parse_line_program(<<elf, statement_list_data);
 
         offset = cu_end;
     }
@@ -141,72 +147,77 @@ parse_abbreviations :: (abbrev_data: [] u8, offset_in: u64) -> Dwarf_Abbreviatio
     return abbreviations, true;
 }
 
-parse_compilation_unit :: (elf: Elf, data: [] u8, abbrevs: Dwarf_Abbreviation_List) -> success: bool {
+parse_compilation_unit :: (elf: Elf, data: [] u8, abbrevs: Dwarf_Abbreviation_List) -> Compilation_Unit, success: bool {
     offset := 0;
     cu: Compilation_Unit;
-    while true {
-        abbrev_id: u64 = ---;
-        success: bool = ---;
-        abbrev_id, offset, success = parse_uleb128(data, offset);
-        if !success     return false;
+    abbrev_id: u64 = ---;
+    success: bool = ---;
+    abbrev_id, offset, success = parse_uleb128(data, offset);
+    if !success     return cu, false;
 
-        abbrev := find_abbrev(abbrevs, abbrev_id);
-        if !abbrev  return false;
+    abbrev := find_abbrev(abbrevs, abbrev_id);
+    if !abbrev  return cu, false;
 
-        if abbrev.tag != .COMPILE_UNIT {
-            log_error("Unexpected abbreviation: %\n", <<abbrev);
-            return false;
-        }
-
-        if !abbrev.has_children {
-            log_error("Unexpected compile unit withot children: %\n", <<abbrev);
-            return false;
-        }
-
-        log("CU abbrev: %\n", <<abbrev);
-
-        for abbrev.attributes {
-            if it.type == {
-                case .PRODUCER;
-                    cu.producer, offset, success = parse_string_attribute(elf, it.format, data, offset);
-                case .LANGUAGE;
-                    value: u64;
-                    value, offset, success = parse_unsigned_int_attribute(elf, it.format, data, offset);
-                    if !success     return false;
-                    range_check_and_store(value, type_info(type_of(cu.language)), *cu.language);
-                case .NAME;
-                    cu.name, offset, success = parse_string_attribute(elf, it.format, data, offset);
-                    if !success     return false;
-                case .STMT_LIST;
-                    cu.statement_list, offset, success = parse_unsigned_int_attribute(elf, it.format, data, offset);
-                    if !success     return false;
-                case .LOW_PC;
-                    cu.low_pc, offset, success = parse_unsigned_int_attribute(elf, it.format, data, offset);
-                    if !success     return false;
-                case .HIGH_PC;
-                    cu.high_pc, offset, success = parse_unsigned_int_attribute(elf, it.format, data, offset);
-                    if !success     return false;
-                    if it.format != .ADDR {
-                        if !cu.low_pc {
-                            log_error("Parsed a relative high_pc before finding a low_pc. That’s technically legal but not yet supported.\n");
-                            return false;
-                        }
-                        cu.high_pc += cu.low_pc;
-                    }
-                case;
-                    offset, success = skip_attribute(elf, it.format, data, offset);
-                    if !success     return false;
-            }
-        }
-        done := false;
-        while !done {
-            done, offset, success = parse_debug_info_entry(elf, data, offset, abbrevs);
-            if !success     return false;
-        }
-        log("Compilation unit: %\n", cu);
-        break; // For now
+    if abbrev.tag != .COMPILE_UNIT {
+        log_error("Unexpected abbreviation: %\n", <<abbrev);
+        return cu, false;
     }
-    return true;
+
+    if !abbrev.has_children {
+        log_error("Unexpected compile unit withot children: %\n", <<abbrev);
+        return cu, false;
+    }
+
+    log("CU abbrev: %\n", <<abbrev);
+
+    for abbrev.attributes {
+        if it.type == {
+            case .PRODUCER;
+                cu.producer, offset, success = parse_string_attribute(elf, it.format, data, offset);
+            case .LANGUAGE;
+                value: u64;
+                value, offset, success = parse_unsigned_int_attribute(elf, it.format, data, offset);
+                if !success     return cu, false;
+                range_check_and_store(value, type_info(type_of(cu.language)), *cu.language);
+            case .NAME;
+                cu.name, offset, success = parse_string_attribute(elf, it.format, data, offset);
+                if !success     return cu, false;
+            case .STMT_LIST;
+                cu.statement_list, offset, success = parse_unsigned_int_attribute(elf, it.format, data, offset);
+                if !success     return cu, false;
+            case .LOW_PC;
+                cu.low_pc, offset, success = parse_unsigned_int_attribute(elf, it.format, data, offset);
+                if !success     return cu, false;
+            case .HIGH_PC;
+                cu.high_pc, offset, success = parse_unsigned_int_attribute(elf, it.format, data, offset);
+                if !success     return cu, false;
+                if it.format != .ADDR {
+                    if !cu.low_pc {
+                        log_error("Parsed a relative high_pc before finding a low_pc. That’s technically legal but not yet supported.\n");
+                        return cu, false;
+                    }
+                    cu.high_pc += cu.low_pc;
+                }
+            case;
+                offset, success = skip_attribute(elf, it.format, data, offset);
+                if !success     return cu, false;
+        }
+    }
+    done := false;
+    while !done {
+        done, offset, success = parse_debug_info_entry(elf, data, offset, abbrevs);
+        if !success     return cu, false;
+    }
+
+    if offset != data.count {
+        remainder := array_view(data, offset);
+        log_error("Unexpected additional data after parsing the compilation unit. Offset was % of %. Remainder:\n%\n", offset, data.count, remainder);
+        return cu, false;
+    }
+
+    log("Compilation unit: %\n", cu);
+
+    return cu, true;
 }
 
 parse_debug_info_entry :: (elf: Elf, data: [] u8, offset_in: s64, abbrevs: Dwarf_Abbreviation_List) -> done: bool, offset: s64, success: bool {
@@ -249,8 +260,8 @@ find_abbrev :: (abbrevs: Dwarf_Abbreviation_List, id: u64) -> *Dwarf_Abbreviatio
     return null;
 }
 
-parse_uleb128 :: (data: [] u8, offset_in: s64) -> value: u64, len: int, success: bool {
-    result: u64;
+parse_uleb128 :: (data: [] u8, offset_in: s64, $Type := u64 ) -> value: Type, len: int, success: bool {
+    value: u64;
     shift := 0;
 
     offset := offset_in;
@@ -261,12 +272,14 @@ parse_uleb128 :: (data: [] u8, offset_in: s64) -> value: u64, len: int, success:
         }
 
         byte := data[offset];
-        result |= ((cast(u64) byte & 0x7F) << shift);
+        value |= ((cast(u64) byte & 0x7F) << shift);
         offset += 1;
         if !(byte & 0x80)  break;
         shift += 7;
     }
 
+
+    result: Type = cast(Type) value;
     return result, offset, true;
 }
 
@@ -284,14 +297,15 @@ parse_sleb128 :: (data: [] u8, offset_in: s64) -> value: s64, len: int, success:
         byte := data[offset];
         result |= ((cast(s64) byte & 0x7F) << shift);
         offset += 1;
+        shift += 7;
         if !(byte & 0x80) {
-            if shift < size_of(s64) && (byte & 0x40) {
+            if shift < size_of(s64) * 8 && (byte & 0x40) {
                 // sign extend
-                result |= - (1 << shift);
+                extension := - (1 << shift);
+                result |= extension;
             }
             break;
         }
-        shift += 7;
     }
 
     return result, offset, true;
@@ -390,6 +404,7 @@ parse_length_block :: (elf: Elf, format: Dwarf_Attribute_Format, data: [] u8, of
             length, offset, success = parse_integer(data, offset_in, u16);
         case .BLOCK4;
             length, offset, success = parse_integer(data, offset_in, u32);
+        case .EXPRLOC; #through;
         case .BLOCK;
             length, offset, success = parse_uleb128(data, offset_in);
     }
@@ -449,10 +464,6 @@ skip_attribute :: (elf: Elf, format: Dwarf_Attribute_Format, data: [] u8, offset
             log_error("Couldn’t skip over unsupported attribute format: %\n", format);
             return offset_in, false;
     }
-}
-
-parse_line_program :: (data: [] u8) {
-    log("Line program is % bytes big\n", data.count);
 }
 
 range_check_and_store :: (value: $T, info: *Type_Info_Integer, pointer: *void) -> (success: bool, low: T, high: T) {
@@ -543,3 +554,4 @@ get_c_string_from_data :: (data: [] u8, offset: s64) -> result: string, success:
 }
 
 #load "dwarf_enums.jai";
+#load "line_program.jai";
