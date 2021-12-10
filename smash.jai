@@ -324,6 +324,9 @@ Target :: struct {
     instruction_addresses: [..] u64;
     instructions: [..] Xed_Decoded_Inst;
     debug_info: Debug_Info;
+
+    source_files: [..] string;
+    source_files_content: [..] string;
 }
 
 Target_State :: enum {
@@ -501,7 +504,7 @@ print_source :: (using target: *Target, source_display: Source_Display) -> succe
                 log_error("Could not find instruction for RIP %\n", formatHex64(rip));
             } else {
                 start := Max(rip_instruction_index - 5, 0);
-                end := Min(rip_instruction_index + 5, instructions.count);
+                end := Min(rip_instruction_index + 5, instructions.count - 1);
                 for start..end {
                     inst := *instructions[it];
                     success := print_instruction(<<inst, target.registers.rip, it == rip_instruction_index);
@@ -532,7 +535,7 @@ print_source :: (using target: *Target, source_display: Source_Display) -> succe
                     }
 
                     mapping := cu.line_info.mappings[it_index - 1];
-                    filename := "(unknown file)";
+                    filename: string;
                     if mapping.file_id > 0 {
                         file_info := cu.line_info.files[mapping.file_id - 1];
                         if file_info.dir_id > 0 {
@@ -541,8 +544,42 @@ print_source :: (using target: *Target, source_display: Source_Display) -> succe
                             filename = file_info.path;
                         }
                     }
+                    source: string;
+                    if filename {
+                        for source_files {
+                            if it == filename {
+                                source = source_files_content[it_index];
+                                break;
+                            }
+                        }
+                        if !source {
+                            array_add(*source_files, filename);
+                            success: bool;
+                            source, success = read_entire_file(filename);
+                            if !success {
+                                log_error("Could not load source file %\n", filename);
+                            }
+                            array_add(*source_files_content, source);
+                        }
+                    } else {
+                        filename = "(unknown file)";
+                    }
 
                     log("File: % line: % column: %\n", filename, mapping.line, mapping.column); 
+                    if mapping.line > 0 && source {
+                        source_line_index := cast (s64) mapping.line - 1;
+                        source_lines := split(source, "\n");
+                        start := Max(source_line_index - 5, 0);
+                        end := Min(source_line_index + 5, source_lines.count - 1);
+                        for start..end {
+                            if it == source_line_index {
+                                log("-> %\n", source_lines[it]);
+                            } else {
+                                log("   %\n", source_lines[it]);
+                            }
+                        }
+                    }
+
                     break;
                 }
             }
