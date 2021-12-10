@@ -1,4 +1,3 @@
-* Show source code for x64 backend (compilation unit does not contain low_pc/high_pc)
 * Show source code along with disassembly
 * Show variable information
 * Show stack traces

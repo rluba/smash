@@ -81,6 +81,11 @@ parse_debug_info :: (elf: *Elf) -> Debug_Info, success: bool {
         cu.line_info, success = decode_line_info(<<elf, statement_list_data);
         if !success     return debug_info, false;
 
+        if !cu.low_pc && cu.line_info.addresses.count {
+            cu.low_pc = cu.line_info.addresses[0];
+            cu.high_pc = cu.line_info.addresses[cu.line_info.addresses.count - 1];
+        }
+
         array_add(*debug_info.compilation_units, cu);
 
         offset = cu_end;
