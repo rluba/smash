@@ -1,5 +1,5 @@
 Args :: struct {
-    port: u16 = 8377; // S = 83, M = 77 in ascii; (adding "ash" would make the number too big)
+    port: u16 = DEFAULT_PORT;
 }
 
 main :: () {
@@ -57,3 +57,4 @@ do_main :: () -> s32 {
 
 #load "socket.jai";
 #load "logger.jai";
+#load "common.jai";

@@ -14,6 +14,8 @@
 *.vcxproj.user
 /.vscode
 .DS_Store
+*.dSYM
+/client
 /smash
 /smash_server
 /tracee

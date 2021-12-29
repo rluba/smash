@@ -33,15 +33,16 @@ main :: () {
     // So that we can load our font, set to path of running executable.
     path := path_strip_filename(get_path_of_running_executable());
     set_working_directory(path);
-    
 
+    client_network_init();
+    
     my_window = create_window(window_width, window_height, "SMASH!");
 
     window_width, window_height = Simp.get_render_dimensions(my_window);
 
     Simp.set_render_target(my_window);
     
-    my_init_fonts();
+    my_init_fonts_and_themes();
     ui_init();
 
     set_text(*server_input.input, "localhost:8377");
@@ -67,7 +68,7 @@ main :: () {
                 window_width  = it.width;
                 window_height = it.height;
                 
-                if should_reinit my_init_fonts();  // Resize the font for the new window size.
+                if should_reinit my_init_fonts_and_themes();  // Resize the font for the new window size.
             }
         }
         
@@ -95,6 +96,7 @@ main :: () {
 
 background_color: Vector3 = .{.157, .157, .157};
 
+show_connect_window := true;
 
 draw_one_frame :: (dt: float) {
     // Simp.update_window(my_window);
@@ -103,31 +105,25 @@ draw_one_frame :: (dt: float) {
     x, y, width, height := get_dimensions(my_window, true);
     ui_per_frame_update(my_window, width, height, current_time);
 
-    button_theme: Button_Theme;  // This will have the default Button_Theme values.
-    button_theme.font = button_font;
-    button_theme.enable_variable_frame_thickness = true; 
-    // 'k' is some resolution-adjusting unit of distance. Right now it is
-    // 1/10 of the screen height, so, 108 pixels at 1920x1080.
-    k := window_height * .1;
-
-    text_theme: Text_Input_Theme;
-    text_theme.font = button_font;
-    
-    r := get_rect(1*k, 4*k, 5*k, button_font.character_height*1.35);
-    server_input.rect = r;
-    draw(*server_input.input, r, *text_theme);
-    
-    r.w = 3*k;
-    r.h = button_font.character_height * 2.0;
-    r.y -= r.h + 0.2*k;
-
-    button_theme.label_theme.alignment = .Center;
-    pressed := button(r, "Connect", *button_theme);
-
-    if pressed {
-        log("We should probably connect to %…", get_result(server_input.input));
+    if show_connect_window {
+        do_connect_window();
     }
 
+    status_text: string;
+    if #complete connection_status == {
+        case .DISCONNECTED;
+            status_text = "Disconnected";
+        case .CONNECTING;
+            status_text = "Connecting…";
+        case .CONNECTED;
+            status_text = "Connected";
+    }
+
+    r: = get_rect(0, 0, xx window_width, button_font.character_height*1.2);
+    status_theme: Label_Theme;
+    status_theme.font = button_font;
+    status_theme.text_color = .{.91, .86, .72, 1};
+    label(r, status_text, *status_theme);
     
     //
     // Draw the title:
@@ -159,7 +155,55 @@ draw_one_frame :: (dt: float) {
     Simp.swap_buffers(my_window);
 }
 
-my_init_fonts :: () {
+
+connect_input_error: string;
+
+do_connect_window :: () {
+    r := get_rect(1*k, 4*k, 5*k, button_font.character_height*1.35);
+    server_input.rect = r;
+    draw(*server_input.input, r, *text_theme);
+    
+    r.y -= r.h + 0.2*k;
+    if connect_input_error {
+        error_theme: Label_Theme;
+        error_theme.font = button_font;
+        error_theme.text_color = .{.91, .34, .25, 1};
+        label(r, connect_input_error, *error_theme);
+    }
+
+    r.w = 3*k;
+    r.h = button_font.character_height * 2.0;
+    r.y -= r.h + 0.2*k;
+
+    button_theme.label_theme.alignment = .Center;
+    can_connect := (connection_status == .DISCONNECTED);
+    pressed := button(r, "Connect", *button_theme, disable_over = !can_connect, disable_press = !can_connect);
+    if pressed {
+        parse_and_connect(get_result(server_input.input));
+    }
+}
+
+parse_and_connect :: (server: string) {
+    success, name_str, port_str := split_from_left(server, #char ":");
+    port := DEFAULT_PORT;
+    if success {
+        port, success = to_integer(port_str);
+        if !success || port > U16_MAX {
+            set_connect_input_error(sprint("Invalid port: %", port_str));
+            return;
+        }
+    }
+
+    set_connect_input_error("");
+    client_network_connect(name_str, xx port);
+}
+
+set_connect_input_error :: (error: string) {
+    free(connect_input_error);
+    connect_input_error = error;
+}
+
+my_init_fonts_and_themes :: () {
     pixel_height := window_height / 24;
     my_font = Simp.get_font_at_size("data", "OpenSans-BoldItalic.ttf", pixel_height);
     assert(my_font != null);
@@ -174,6 +218,14 @@ my_init_fonts :: () {
     pixel_height = window_height / 30;
     story_font = Simp.get_font_at_size("data", "OpenSans-BoldItalic.ttf", pixel_height);
 //    title_font = Simp.get_font_at_size("data", "OpenSans-BoldItalic.ttf", pixel_height);
+
+    button_theme.font = button_font;
+    button_theme.enable_variable_frame_thickness = true; 
+    // 'k' is some resolution-adjusting unit of distance. Right now it is
+    // 1/10 of the screen height, so, 108 pixels at 1920x1080.
+    k = window_height * .1;
+
+    text_theme.font = button_font;
 }
 
 Font :: Simp.Dynamic_Font;
@@ -182,6 +234,12 @@ my_font:     *Font;
 button_font: *Font;
 title_font:  *Font;
 story_font:  *Font;
+
+// 'k' is some resolution-adjusting unit of distance. Right now it is
+// 1/10 of the screen height, so, 108 pixels at 1920x1080.
+k: float;
+button_theme: Button_Theme;  // This will have the default Button_Theme values.
+text_theme: Text_Input_Theme;
 
 Simp  :: #import "Simp";
 Input :: #import "Input";
@@ -193,4 +251,6 @@ Input :: #import "Input";
 #import "System";  // For get_path_of_running_executable. @Cleanup.
 #import "String";  // For path_strip_filename. @Cleanup.
 
+#load "common.jai";
 
+#load "client_network.jai";
