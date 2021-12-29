@@ -258,7 +258,7 @@ my_init_fonts_and_themes :: () {
     assert(button_font != null);
 
     pixel_height = window_height / 7;
-    title_font = Simp.get_font_at_size("data", "Miama.otf", pixel_height);
+    title_font = Simp.get_font_at_size("data", "OpenSans-Bold.ttf", pixel_height);
 
     pixel_height = window_height / 30;
     story_font = Simp.get_font_at_size("data", "OpenSans-BoldItalic.ttf", pixel_height);
