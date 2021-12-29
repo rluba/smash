@@ -38,7 +38,7 @@ do_main :: () -> s32 {
 	log("Listening on socket %\n", server_socket);
 
     while true {
-        client_socket, client_addr := accept(server_socket, 0);
+        client_socket, client_addr := accept(server_socket);
         if client_socket == -1 {
             log_error("Socket accept failed: %\n", errno());
             return 1;
@@ -54,6 +54,7 @@ do_main :: () -> s32 {
 #scope_file
 
 #import "Command_Line";
+#import "POSIX";
 
 #load "socket.jai";
 #load "logger.jai";

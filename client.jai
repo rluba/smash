@@ -21,6 +21,9 @@ Text_Input_And_Rect :: struct {
 
 server_input: Text_Input_And_Rect;
 
+log_messages: [..] string;
+log_scroll_value: float;
+
 main :: () {
     #if OS == .WINDOWS {
         Windows :: #import "Windows";
@@ -109,6 +112,21 @@ draw_one_frame :: (dt: float) {
         do_connect_window();
     }
 
+    while true {
+        network_result, success := try_get_next_network_result();
+        if !success break;
+        // @ToDo: Use details!
+        if network_result.type == {
+            case .ERROR;
+                connection_status = .DISCONNECTED;
+                array_add(*log_messages, copy_string(network_result.error));
+            case .CONNECTED;
+                connection_status = .CONNECTED;
+                array_add(*log_messages, sprint("Connected to %:%", network_result.server.name, network_result.server.port));
+        }
+        free_result(network_result);
+    }
+
     status_text: string;
     if #complete connection_status == {
         case .DISCONNECTED;
@@ -123,7 +141,34 @@ draw_one_frame :: (dt: float) {
     status_theme: Label_Theme;
     status_theme.font = button_font;
     status_theme.text_color = .{.91, .86, .72, 1};
+    status_theme.alignment = .Left;
     label(r, status_text, *status_theme);
+
+    {
+ 	    theme := default_overall_theme.scrollable_region_theme;
+ 	    theme.region_background.shape.rounding_flags = 0;
+ 	    
+        r.y += r.h;
+        r.h = 2*k;
+ 	    
+ 	    region, inside := begin_scrollable_region(r, *theme);
+ 	    
+ 	    label_height := button_font.character_height * 1.1;
+ 	    s := inside;
+ 	    s.y = s.y + s.h - label_height;
+ 	    s.h = label_height;
+ 	    s.y += log_scroll_value;
+ 	    
+        log_theme := status_theme;
+
+        for log_messages {
+            label(s, it, *log_theme);
+            s.y -= floor(label_height * 1.1 + 0.5);
+        }
+        
+ 	    end_scrollable_region(region, s.x + s.w, s.y, *log_scroll_value);
+    }
+
     
     //
     // Draw the title:
@@ -135,19 +180,19 @@ draw_one_frame :: (dt: float) {
     r = get_rect(0, window_height - label_height, xx window_width, label_height);
     label(r, "SMASH!", *label_theme);
 
-    //
-    // Color Picker stuff.
-    //
-    {
-        w := 3 * k;
-        h := 4 * k;
-        r = get_rect(window_width - w, 0, w, h);
-        color_picker_theme := *default_overall_theme.color_picker_theme;
-        applied := color_picker(r, *background_color, color_picker_theme);
-        if applied {
-            log("Applied color: %\n", background_color);
-        }
-    }
+    ////
+    //// Color Picker stuff.
+    ////
+    //{
+    //    w := 3 * k;
+    //    h := 4 * k;
+    //    r = get_rect(window_width - w, 0, w, h);
+    //    color_picker_theme := *default_overall_theme.color_picker_theme;
+    //    applied := color_picker(r, *background_color, color_picker_theme);
+    //    if applied {
+    //        log("Applied color: %\n", background_color);
+    //    }
+    //}
 
     
     draw_popups();  // This draws Subwindows as well.

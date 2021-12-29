@@ -38,16 +38,28 @@ free_command :: (command: *Network_Command) {
 
 Network_Result_Type :: enum {
     ERROR;
+    CONNECTED;
 }
 
 Network_Result :: struct {
     type: Network_Result_Type;
     union {
         error: string;
+        server: Server;
     }
 }
 
-try_get_next_result :: () -> result: Network_Result, success: bool {
+free_result :: (result: Network_Result) {
+    if #complete result.type == {
+        case .ERROR;
+            free(result.error);
+        case .CONNECTED;
+            free(result.server.name);
+    }
+}
+
+
+try_get_next_network_result :: () -> result: Network_Result, success: bool {
     wait_result := wait_for(*network_result_semaphore, 0);
     if wait_result == .ERROR {
         log_error("Could not fetch result!");
@@ -63,13 +75,6 @@ try_get_next_result :: () -> result: Network_Result, success: bool {
     result := network_results[0];
     array_ordered_remove_by_index(*network_results, 0);
     return result, true;
-}
-
-free_result :: (result: *Network_Result) {
-    if #complete result.type == {
-        case .ERROR;
-            free(result.error);
-    }
 }
 
 next_command_mutex: Mutex;
@@ -124,6 +129,7 @@ network_thread_proc :: (thread: *Thread) -> s64{
             free_command(*next_command);
         }
     }
+
     return 0;
 }
 
@@ -132,39 +138,53 @@ try_connect :: (server: Server) {
     defer free(server_c_string);
 
     addresses: *addrinfo;
-    result := getaddrinfo(server_c_string, null, null, *addresses);
+    hints: addrinfo;
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_protocol = IPPROTO_TCP;
+    hints.ai_flags = AI_V4MAPPED_CFG | AI_ADDRCONFIG;
+    result := getaddrinfo(server_c_string, null, *hints, *addresses);
     if result != 0 {
         add_error(sprint("Could not look up \"%\": %", server.name, result));
         return;
     }
     defer freeaddrinfo(addresses);
+    
+    address := addresses[0].ai_addr;
+    address_len := addresses[0].ai_addrlen;
+    if address.sa_family == AF_INET {
+        address_v4 := cast(*sockaddr_in) address;
+        address_v4.sin_port = htons(server.port);
+    } else {
+        assert(address.sa_family == AF_INET6);
+        address_v6 := cast(*sockaddr_in6) address;
+        address_v6.sin6_port = htons(server.port);
+    }
 
-    log("Pretending to connect to %:%\n", <<addresses, server.port);
+    log("Trying to connect to %", <<address);
 
-    // print("Address: ");
-    // for addr_data.sa_data print("% ", it);
-    // print("\n");
-    // sock := socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    // if (sock == -1) {
-    //     print("Failed to created TCP socket. Error code: %\n", errno()); 
-    //     exit(1);
-    // }
+    sock := socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    result = connect(sock, address, address_len);
+    if result == -1 {
+        add_error(sprint("Could not connect to \"%:%\": error %", server.name, server.port, errno()));
+        return;
+    }
 
-    // defer close(sock);
-
-    // if (connect(sock, *addr_data, size_of(type_of(addr_data))) == -1) {
-    //     print("Failed to connect. Error code %\n", errno());
-    //     exit(1);
-    // }
-    // hello := "GET / HTTP/1.1\nHost: google.com\nAccept-Language: en\n\n";
-    // num_sent := send(sock, hello.data, cast(u64) hello.count, 0);
+    nr: Network_Result;
+    nr.type = .CONNECTED;
+    nr.server.name = copy_string(server.name);
+    nr.server.port = server.port;
+    add_result(nr);
 }
 
 add_error :: (error: string) {
-    log_error("Adding error: %", error);
     result: Network_Result;
     result.type = .ERROR;
     result.error = error;
+    add_result(result);
+}
+
+add_result :: (result: Network_Result) {
     lock(*network_result_mutex);
     defer unlock(*network_result_mutex);
     array_add(*network_results, result);
