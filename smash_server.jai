@@ -44,17 +44,42 @@ do_main :: () -> s32 {
             return 1;
         }
         print("Accepted socket % from %\n", client_socket, client_addr);
-
-        close(client_socket);
+        thread := New(Thread);
+        thread_init(thread, smash_server_thread_entry_proc);
+        thread.data = xx client_socket;
+        thread_start(thread);
     }
 
     return 0;
 }
 
+smash_server_thread_entry_proc :: (thread: *Thread) -> s64 {
+    client_socket := cast(s32) thread.data;
+    buffer: [512] u8;
+
+    result := recv(client_socket, buffer.data, buffer.count, 0);
+    if result == -1 {
+        log_error("Couldn’t read from socket %: error %", client_socket, errno());
+        return 1;
+    }
+
+    print("Received % bytes:", result);
+    for i: 0..result-1 {
+        if i % 16 == 0  print("\n");
+        print("% ", formatInt(buffer[i], base = 16, minimum_digits = 2));
+    }
+
+    close(client_socket);
+
+    return 0;
+}
+
+
 #scope_file
 
 #import "Command_Line";
 #import "POSIX";
+#import "Thread";
 
 #load "socket.jai";
 #load "logger.jai";

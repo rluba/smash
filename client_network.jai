@@ -1,6 +1,5 @@
 network_thread: Thread;
 
-
 Connection_Status :: enum {
     DISCONNECTED;
     CONNECTING;
@@ -9,20 +8,22 @@ Connection_Status :: enum {
 
 connection_status: Connection_Status;
 
-Network_Command_Type :: enum {
-    NONE;
-    CONNECT;
-}
-
 Server :: struct {
     name: string;
     port: u16;
+}
+
+Network_Command_Type :: enum {
+    NONE;
+    CONNECT;
+    MESSAGE;
 }
 
 Network_Command :: struct {
     type: Network_Command_Type;
     union {
         server: Server;
+        message: *Message;
     }
 }
 
@@ -31,6 +32,9 @@ free_command :: (command: *Network_Command) {
         case .NONE;
         case .CONNECT;
             free(command.server.name);
+        case .MESSAGE;
+            // @Incomlete: We need to free each individual message type here or use a pool or whatnot
+            free(command.message);
     }
 
     command.type = .NONE;
@@ -106,9 +110,20 @@ client_network_connect :: (server_name: string, port: u16) {
     signal(*next_command_semaphore);
 }
 
+client_network_send_message :: (message: *Message) {
+    lock(*next_command_mutex);
+    defer unlock(*next_command_mutex);
+    free_command(*next_command);
+    next_command.type = .MESSAGE;
+    next_command.message = message;
+    signal(*next_command_semaphore);
+}
+
 #scope_file
 
 network_thread_proc :: (thread: *Thread) -> s64{
+    server_socket: s32 = -1;
+
     while true {
         log("Waiting for a command…");
         wait_for(*next_command_semaphore);
@@ -117,15 +132,7 @@ network_thread_proc :: (thread: *Thread) -> s64{
         {
             lock(*next_command_mutex);
             defer unlock(*next_command_mutex);
-            if #complete next_command.type == {
-                case .NONE;
-                    log_error("Receieved NONE command!");
-                    assert(false);
-                case .CONNECT;
-                    server := next_command.server;
-                    try_connect(server);
-
-            }
+            handle_command(next_command, *server_socket);
             free_command(*next_command);
         }
     }
@@ -133,7 +140,37 @@ network_thread_proc :: (thread: *Thread) -> s64{
     return 0;
 }
 
-try_connect :: (server: Server) {
+handle_command :: (command: Network_Command, server_socket: *s32) {
+    if #complete command.type == {
+        case .NONE;
+            log_error("Receieved NONE command!");
+            assert(false);
+        case .CONNECT;
+            server := command.server;
+            <<server_socket = try_connect(server);
+        case .MESSAGE;
+            if <<server_socket == -1 {
+                add_error("Can’t send message while not connected");
+                return;
+            }
+
+            log("Sending message: %", <<command.message);
+            buffer := serialize_message(command.message);
+            defer array_free(buffer);
+            total_sent := 0;
+            while total_sent < buffer.count {
+                bytes_sent := send(<<server_socket, buffer.data + total_sent, xx (buffer.count - total_sent), 0);
+                if bytes_sent == -1 {
+                    add_error(sprint("Couldn’t send message: error %", errno()));
+                    return;
+                }
+                total_sent += xx bytes_sent;
+            }
+            log("Sent message: %", command.message);
+    }
+}
+
+try_connect :: (server: Server) -> socket: s32, success: bool{
     server_c_string := to_c_string(server.name);
     defer free(server_c_string);
 
@@ -151,7 +188,7 @@ try_connect :: (server: Server) {
     result := getaddrinfo(server_c_string, null, *hints, *addresses);
     if result != 0 {
         add_error(sprint("Could not look up \"%\": %", server.name, result));
-        return;
+        return -1, false;
     }
     defer freeaddrinfo(addresses);
     
@@ -172,7 +209,7 @@ try_connect :: (server: Server) {
     result = connect(sock, address, address_len);
     if result == -1 {
         add_error(sprint("Could not connect to \"%:%\": error %", server.name, server.port, errno()));
-        return;
+        return -1, false;
     }
 
     nr: Network_Result;
@@ -180,7 +217,150 @@ try_connect :: (server: Server) {
     nr.server.name = copy_string(server.name);
     nr.server.port = server.port;
     add_result(nr);
+
+    return sock, true;
 }
+
+serialize_message :: (message: *Message) -> [] u8 {
+    if #complete message.type == {
+        case .INIT;
+            init_message := cast(*Init_Message) message;
+            return serialize_concrete_message(<<init_message);
+        case .RUN;
+            run_message := cast(*Run_Message) message;
+            return serialize_concrete_message(<<run_message);
+    }
+}
+
+serialize_concrete_message :: (message: $T/Message) -> [] u8 {
+    message_size: s64 = get_network_struct_size(*message, type_info(T));
+    // @ToDo: Use a bucket array instead and do the serialization in a single pass (so we save the duplicate code for computing the size up-front)
+    result: [] u8;
+    result.count = 8 + message_size; 
+    log("Message of type % is % long", T, result.count);
+    result.data = alloc(result.count);
+    memcpy(result.data, *message_size, size_of(type_of(message_size)));
+    serialize_struct(result.data + size_of(type_of(message_size)), *message, type_info(T));
+    return result;
+}
+
+get_network_size :: (data: *void, info: *Type_Info) -> s64 {
+    if info.type == {
+        case .INTEGER; #through;
+        case .FLOAT; #through;
+        case .ENUM;
+            return info.runtime_size;
+        case .BOOL;
+            assert(info.runtime_size == 1);
+            return info.runtime_size;
+        case .STRING;
+            info_string := cast(*Type_Info_String) info;
+            assert(info_string.relative_pointer_size == 0); // @Incomplete
+            size := 8;
+            member_str := cast(*string) data;
+            size += member_str.count;
+            return size;
+        // POINTER   :: 4;
+        // PROCEDURE :: 5;
+        // VOID      :: 6;
+        case .STRUCT;
+            return get_network_struct_size(data, cast(*Type_Info_Struct)info);
+        case .ARRAY;
+            info_array := cast(*Type_Info_Array) info;
+			element_size := info_array.element_type.runtime_size;
+			assert(element_size != -1);  // @Robustness @Incomplete: Right now, this might fail.
+            num_elements := info_array.array_count;
+            element_pointer := data;
+            size := 0;
+            if num_elements == -1 {
+                size += 8;
+                num_elements = <<(cast(*s64) data);
+                element_pointer = <<(cast(**void) (data + 8));
+            }
+            for i: 0..num_elements-1 {
+                size += get_network_size(element_pointer + i * element_size, info_array.element_type);
+            }
+            return size;
+        // OVERLOAD_SET :: 9;
+        // ANY       :: 10;
+        // POLYMORPHIC_VARIABLE :: 12;
+        // TYPE      :: 13;
+        // CODE      :: 14;
+        case;
+            assert(false);
+            return 0;
+    }
+}
+
+get_network_struct_size :: (data: *void, info: *Type_Info_Struct) -> s64 {
+    size: s64;
+    for * info.members {
+        member_info := it.type;
+        size += get_network_size(data + it.offset_in_bytes, member_info);
+        log("Size is % after member % of type %", size, <<it, <<member_info);
+    }
+
+    return size;
+}
+
+serialize_data :: (dest: *void, data: *void, info: *Type_Info) -> written: s64 {
+    if info.type == {
+        case .INTEGER; #through;
+        case .FLOAT; #through;
+        case .ENUM; #through;
+        case .BOOL;
+            memcpy(dest, data, info.runtime_size);
+            return info.runtime_size;
+        case .STRING;
+            info_string := cast(*Type_Info_String) info;
+            memcpy(dest, data, 8);
+            member_str := cast(*string) data;
+            memcpy(dest + 8, member_str.data, member_str.count);
+            return 8 + member_str.count;
+        // POINTER   :: 4;
+        // PROCEDURE :: 5;
+        // VOID      :: 6;
+        case .STRUCT;
+            return serialize_struct(dest, data, cast(*Type_Info_Struct)info);
+        case .ARRAY;
+            info_array := cast(*Type_Info_Array) info;
+			element_size := info_array.element_type.runtime_size;
+			assert(element_size != -1);  // @Robustness @Incomplete: Right now, this might fail.
+            num_elements := info_array.array_count;
+            element_pointer := data;
+            offset := 0;
+            if num_elements == -1 {
+                num_elements = <<(cast(*s64) data);
+                element_pointer = <<(cast(**void) (data + 8));
+
+                <<(cast(*s64) dest) = num_elements;
+                offset += 8;
+            }
+            for i: 0..num_elements-1 {
+                offset += serialize_data(dest + offset, element_pointer + i * element_size, info_array.element_type);
+            }
+            return offset;
+        // OVERLOAD_SET :: 9;
+        // ANY       :: 10;
+        // POLYMORPHIC_VARIABLE :: 12;
+        // TYPE      :: 13;
+        // CODE      :: 14;
+        case;
+            assert(false);
+            return 0;
+    }
+}
+
+serialize_struct :: (dest: *void, data: *void, info: *Type_Info_Struct) -> s64 {
+    offset: s64;
+    for * info.members {
+        member_info := it.type;
+        offset += serialize_data(dest + offset, data + it.offset_in_bytes, member_info);
+    }
+
+    return offset;
+}
+
 
 add_error :: (error: string) {
     result: Network_Result;
@@ -198,4 +378,5 @@ add_result :: (result: Network_Result) {
 
 #import "Thread";
 #load "socket.jai";
+#load "network_messages.jai";
 

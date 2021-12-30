@@ -123,6 +123,11 @@ draw_one_frame :: (dt: float) {
             case .CONNECTED;
                 connection_status = .CONNECTED;
                 array_add(*log_messages, sprint("Connected to %:%", network_result.server.name, network_result.server.port));
+                message := New(Init_Message);
+                message.version = 1;
+                message.work_dir = copy_string("/home/raphael/speckflunder/jai/smash");
+                array_add(*message.args, copy_string("./tracee"));
+                client_network_send_message(message);
         }
         free_result(network_result);
     }
