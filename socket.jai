@@ -65,11 +65,6 @@ bind :: (socket: s32, address: u32, port: u16, family: type_of(sockaddr_in.sin_f
     return bind(socket, cast(*sockaddr)*server_address, size_of(sockaddr_in));
 }
 
-htonl :: (hostlong: u32) -> u32 #foreign libc;
-htons :: (hostshort: u16) -> u16 #foreign libc;
-ntohl :: (netlong: u32) -> u32 #foreign libc;
-ntohs :: (netshort: u16) -> u16 #foreign libc;
-
 #scope_file
 
 #import "Basic";

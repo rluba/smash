@@ -15,7 +15,7 @@ main :: () {
 }
 
 do_main :: () -> s32 {
-    args_success, args, is_set, extra_args := parse_arguments(Args, allow_free_arguments = true);
+    args_success, args, is_set, extra_args := parse_arguments(Args);
     if !args_success {
         log_error("Could not parse arguments\n");
         return 1;

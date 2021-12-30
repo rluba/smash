@@ -142,7 +142,12 @@ try_connect :: (server: Server) {
     hints.ai_family = AF_INET;
     hints.ai_socktype = SOCK_STREAM;
     hints.ai_protocol = IPPROTO_TCP;
-    hints.ai_flags = AI_V4MAPPED_CFG | AI_ADDRCONFIG;
+    #if OS == .LINUX {
+        hints.ai_flags = AI_V4MAPPED | AI_ADDRCONFIG;
+    }
+    #if OS == .MACOS {
+        hints.ai_flags = AI_V4MAPPED_CFG | AI_ADDRCONFIG;
+    }
     result := getaddrinfo(server_c_string, null, *hints, *addresses);
     if result != 0 {
         add_error(sprint("Could not look up \"%\": %", server.name, result));
