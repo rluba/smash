@@ -108,10 +108,6 @@ draw_one_frame :: (dt: float) {
     x, y, width, height := get_dimensions(my_window, true);
     ui_per_frame_update(my_window, width, height, current_time);
 
-    if show_connect_window {
-        do_connect_window();
-    }
-
     while true {
         network_result, success := try_get_next_network_result();
         if !success break;
@@ -123,7 +119,7 @@ draw_one_frame :: (dt: float) {
             case .CONNECTED;
                 connection_status = .CONNECTED;
                 array_add(*log_messages, sprint("Connected to %:%", network_result.server.name, network_result.server.port));
-                message := New(Init_Message);
+                message := New(Message_Init);
                 message.version = 1;
                 message.work_dir = copy_string("/home/raphael/speckflunder/jai/smash");
                 array_add(*message.args, copy_string("./tracee"));
@@ -141,6 +137,31 @@ draw_one_frame :: (dt: float) {
         case .CONNECTED;
             status_text = "Connected";
     }
+
+
+    if show_connect_window {
+        do_connect_window();
+    }
+
+
+    {
+        h := button_font.character_height * 2.0;
+        r := get_rect(0, window_height - h, 1.2*k, h);
+
+        can_run := (connection_status == .CONNECTED);
+        b_theme := ifx can_run then *button_theme else *disabled_button_theme;
+        pressed := button(r, "Continue", b_theme, disable_over = !can_run, disable_press = !can_run);
+        if pressed {
+            send_run_command(.CONTINUE);
+        }
+
+        r.x += r.w + 0.2*k;
+        pressed = button(r, "Step", b_theme, disable_over = !can_run, disable_press = !can_run);
+        if pressed {
+            send_run_command(.STEP);
+        }
+    }
+    
 
     r: = get_rect(0, 0, xx window_width, button_font.character_height*1.2);
     status_theme: Label_Theme;
@@ -225,9 +246,9 @@ do_connect_window :: () {
     r.h = button_font.character_height * 2.0;
     r.y -= r.h + 0.2*k;
 
-    button_theme.label_theme.alignment = .Center;
     can_connect := (connection_status == .DISCONNECTED);
-    pressed := button(r, "Connect", *button_theme, disable_over = !can_connect, disable_press = !can_connect);
+    b_theme := ifx can_connect then *button_theme else *disabled_button_theme;
+    pressed := button(r, "Connect", b_theme, disable_over = !can_connect, disable_press = !can_connect);
     if pressed {
         parse_and_connect(get_result(server_input.input));
     }
@@ -246,6 +267,12 @@ parse_and_connect :: (server: string) {
 
     set_connect_input_error("");
     client_network_connect(name_str, xx port);
+}
+
+send_run_command :: (type: Run_Type) {
+    message := New(Message_Run);
+    message.run_type = type;
+    client_network_send_message(message);
 }
 
 set_connect_input_error :: (error: string) {
@@ -271,6 +298,12 @@ my_init_fonts_and_themes :: () {
 
     button_theme.font = button_font;
     button_theme.enable_variable_frame_thickness = true; 
+    button_theme.label_theme.alignment = .Center;
+
+    disabled_button_theme = button_theme;
+    disabled_button_theme.text_color = .{.32, .32, .32, 1.0};
+    disabled_button_theme.frame_color = .{.20, .20, .25, 1.0};
+
     // 'k' is some resolution-adjusting unit of distance. Right now it is
     // 1/10 of the screen height, so, 108 pixels at 1920x1080.
     k = window_height * .1;
@@ -288,7 +321,8 @@ story_font:  *Font;
 // 'k' is some resolution-adjusting unit of distance. Right now it is
 // 1/10 of the screen height, so, 108 pixels at 1920x1080.
 k: float;
-button_theme: Button_Theme;  // This will have the default Button_Theme values.
+button_theme: Button_Theme;
+disabled_button_theme: Button_Theme;
 text_theme: Text_Input_Theme;
 
 Simp  :: #import "Simp";

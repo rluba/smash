@@ -264,11 +264,11 @@ smash_server_thread_entry_proc :: (thread: *Thread) -> s64 {
                 for pending_messages {
                     if #complete it.message.type == {
                         case .INIT;
-                            message_init := cast(*Init_Message) it.message;
+                            message_init := cast(*Message_Init) it.message;
                             log("Received init message: %", <<message_init);
                             success = handle_init_message(*state, <<message_init);
                         case .RUN;
-                            message_run := cast(*Run_Message) it.message;
+                            message_run := cast(*Message_Run) it.message;
                             log("Received run message: %", <<message_run);
                             success = handle_run_message(*state, <<message_run);
                     }
@@ -314,7 +314,7 @@ free_target :: (target: *Target) {
     // @Incomplete: Moar cleanup
 }
 
-handle_init_message :: (using state: *Debug_State, message: Init_Message) -> success: bool {
+handle_init_message :: (using state: *Debug_State, message: Message_Init) -> success: bool {
     free_target(*target);
     poll_fds.count = 1;
 
@@ -392,7 +392,7 @@ handle_init_message :: (using state: *Debug_State, message: Init_Message) -> suc
     return true;
 }
 
-handle_run_message :: (using state: *Debug_State, message: Run_Message) -> bool {
+handle_run_message :: (using state: *Debug_State, message: Message_Run) -> bool {
     success: bool;
     if #complete message.run_type == {
         case .CONTINUE;

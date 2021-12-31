@@ -7,7 +7,7 @@ Message :: struct {
     type: Message_Type;
 }
 
-Init_Message :: struct {
+Message_Init :: struct {
     using base: Message;
     type = .INIT;
     version: u16;
@@ -20,8 +20,9 @@ Run_Type :: enum u8 {
     STEP;
 }
 
-Run_Message :: struct {
+Message_Run :: struct {
     using base: Message;
+    type = .RUN;
     run_type: Run_Type;
 }
 
@@ -30,10 +31,10 @@ Message_Size_Type :: s64;
 serialize_message :: (message: *Message) -> [] u8 {
     if #complete message.type == {
         case .INIT;
-            init_message := cast(*Init_Message) message;
+            init_message := cast(*Message_Init) message;
             return serialize_concrete_message(<<init_message);
         case .RUN;
-            run_message := cast(*Run_Message) message;
+            run_message := cast(*Message_Run) message;
             return serialize_concrete_message(<<run_message);
     }
 }
@@ -186,10 +187,10 @@ deserialize_message :: (data: [] u8) -> *Message, num_bytes_read: s64, success: 
 
     if #complete message.type == {
         case .INIT;
-            message, num_bytes_read, success := deserialize_concrete_message(data_without_size, Init_Message);
+            message, num_bytes_read, success := deserialize_concrete_message(data_without_size, Message_Init);
             return message, num_bytes_read + size_of(Message_Size_Type), success;
         case .RUN;
-            message, num_bytes_read, success := deserialize_concrete_message(data_without_size, Run_Message);
+            message, num_bytes_read, success := deserialize_concrete_message(data_without_size, Message_Run);
             return message, num_bytes_read + size_of(Message_Size_Type), success;
     }
 }
