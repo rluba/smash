@@ -159,9 +159,18 @@ handle_command :: (command: Network_Command, server_socket: *s32) {
             defer array_free(buffer);
             total_sent := 0;
             while total_sent < buffer.count {
+                flags: s32 = 0;
+                #if OS == .LINUX {
+                    flags |= MSG_NOSIGNAL;
+                }
                 bytes_sent := send(<<server_socket, buffer.data + total_sent, xx (buffer.count - total_sent), 0);
                 if bytes_sent == -1 {
-                    add_error(sprint("Couldn’t send message: error %", errno()));
+                    error := errno();
+                    if error == EPIPE {
+                        add_error(copy_string("Couldn’t send message: connection closed by server"));
+                    } else {
+                        add_error(sprint("Couldn’t send message: error %", error));
+                    }
                     return;
                 }
                 total_sent += xx bytes_sent;
@@ -210,6 +219,16 @@ try_connect :: (server: Server) -> socket: s32, success: bool{
     if result == -1 {
         add_error(sprint("Could not connect to \"%:%\": error %", server.name, server.port, errno()));
         return -1, false;
+    }
+
+    #if OS == .MACOS {
+        set: s32 = 1;
+        result = setsockopt(sock, SOL_SOCKET, SO_NOSIGPIPE, *set, size_of(type_of(set)));
+        if result == -1 {
+            add_error(sprint("Could not set socket options: error %", errno()));
+            close(sock);
+            return -1 ,false;
+        }
     }
 
     nr: Network_Result;
