@@ -160,8 +160,11 @@ update :: (dt: float) {
                 if #complete message.type == {
                     case .OUTPUT;
                         output_message := cast(*Message_Output) message;
-                        // log("Got message: %", <<output_message);
                         append_output(output_message.data, output_message.output_type);
+                    case .REGISTERS;
+                        registers_message := cast(*Message_Registers) message;
+                        // @ToDo: Proper registers view
+                        append_output(sprint("Registers: %\n", registers_message.registers), .STDOUT);
 
                     case .INIT; #through;
                     case .RUN; 

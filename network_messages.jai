@@ -5,6 +5,7 @@ Message_Type :: enum u32 {
 
     // server -> client
     OUTPUT;
+    REGISTERS;
 }
 
 Message :: struct {
@@ -43,6 +44,13 @@ Message_Output :: struct {
     data: string;
 }
 
+Message_Registers :: struct {
+    using base: Message;
+    type = .REGISTERS;
+    registers: User_Regs;
+    fp_registers: User_Fpregs;
+}
+
 Message_Size_Type :: s64;
 
 serialize_message :: (message: *Message) -> [] u8 {
@@ -55,6 +63,9 @@ serialize_message :: (message: *Message) -> [] u8 {
             return serialize_concrete_message(<<m);
         case .OUTPUT;
             m := cast(*Message_Output) message;
+            return serialize_concrete_message(<<m);
+        case .REGISTERS;
+            m := cast(*Message_Registers) message;
             return serialize_concrete_message(<<m);
     }
 }
@@ -215,6 +226,9 @@ deserialize_message :: (data: [] u8) -> *Message, num_bytes_read: s64, success: 
         case .OUTPUT;
             message, num_bytes_read, success := deserialize_concrete_message(data_without_size, Message_Output);
             return message, num_bytes_read + size_of(Message_Size_Type), success;
+        case .REGISTERS;
+            message, num_bytes_read, success := deserialize_concrete_message(data_without_size, Message_Registers);
+            return message, num_bytes_read + size_of(Message_Size_Type), success;
     }
 }
 
@@ -316,7 +330,7 @@ deserialize_struct :: (dest: *void, src: [] u8, info: *Type_Info_Struct) -> num_
 
 Message_Parser :: struct (thread_safe: bool) {
     // @Speed: Use a ring buffer instead?
-    unparsed_buffer: [512] u8; // @Incomplete: maybe auto-grow this buffer up to a certain size?
+    unparsed_buffer: [2048] u8; // @Incomplete: maybe auto-grow this buffer up to a certain size?
     num_unparsed_bytes := 0;
 
     received_messages: [..] Deserialized_Message;
@@ -430,6 +444,8 @@ maybe_scope_lock_unused_pools :: (using parser: *$T/Message_Parser) #expand {
         `defer unlock(*unused_pools_mutex);
     }
 }
+
+#load "target_info.jai";
 
 #scope_file
 

@@ -111,6 +111,8 @@ smash_server_thread_entry_proc :: (thread: *Thread) -> s64 {
         }
 
         num_events := poll(poll_fds.data, xx poll_fds.count, -1);
+        // @Incomplete: Check for errors!
+
         success := true;
         if poll_fds[0].revents & POLLIN {
             if !read_raw_message_data(*message_parser, client_socket) {
@@ -196,7 +198,8 @@ smash_server_thread_entry_proc :: (thread: *Thread) -> s64 {
                         // log("Target state changed to %\n", target.state);
 
                         if !fetch_fp_registers(*target)     return 1;
-                        print_registers(*target);
+                        send_registers(*state);
+
                         if !print_source(*target, source_display)   return 1;
                     }
                 } else {
@@ -215,8 +218,8 @@ smash_server_thread_entry_proc :: (thread: *Thread) -> s64 {
                             case SIGSEGV;
                                 print("Segfault! Code % – %\n", cast(Si_Code_Sigsegv) info.si_code, info._sigfault);
                         }
-                        if !fetch_registers(*target)   return 1;
-                        print_registers(*target);
+                        if !fetch_registers(*target)    return 1;
+                        send_registers(*state);
                         
                         target.state = .EXITED;
                     } else {
@@ -247,7 +250,9 @@ smash_server_thread_entry_proc :: (thread: *Thread) -> s64 {
                             message_run := cast(*Message_Run) deserialized_message.message;
                             log("Received run message: %", <<message_run);
                             success = handle_run_message(*state, <<message_run);
-                        case .OUTPUT;
+
+                        case .OUTPUT; #through;
+                        case .REGISTERS;
                             assert(false);
                     }
 
@@ -315,6 +320,13 @@ send_entire_pipe :: (state: *Debug_State, fd: s32, type: Output_Type) -> success
     }
 
     return true;
+}
+
+send_registers :: (state: *Debug_State) {
+    message: Message_Registers;
+    memcpy(*message.registers, *state.target.registers, size_of(type_of(message.registers)));
+    memcpy(*message.fp_registers, *state.target.fp_registers, size_of(type_of(message.fp_registers)));
+    send_message(state, *message);
 }
 
 send_message :: (using state: *Debug_State, message: *Message) {
