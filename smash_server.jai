@@ -68,26 +68,19 @@ do_main :: () -> s32 {
     return 0;
 }
 
-Deserialized_Message :: struct {
-    pool: Pool;
-    message: *Message;
-}
-
 Debug_State :: struct {
     client_socket: s32;
     target: Target;
     poll_fds: [..] pollfd;
-    received_messages: [..] Deserialized_Message;
+    message_parser: Message_Parser;
     messages_to_send: [..] [] u8;
-    unused_pools: [..] Pool;
     pending_action := Debugger_Action.NOTHING;
     source_display := Source_Display.DISASSEMBLY;
 }
 
 smash_server_thread_entry_proc :: (thread: *Thread) -> s64 {
     using state: Debug_State;
-    remember_allocators(*received_messages);
-    remember_allocators(*unused_pools);
+    init(*message_parser);
 
     client_socket = cast(s32) thread.data;
     defer close(client_socket);
@@ -98,10 +91,6 @@ smash_server_thread_entry_proc :: (thread: *Thread) -> s64 {
         log_error("Couldn’t set socket to non-blocking: error %", errno());
         return 1;
     }
-
-    // @Speed: Use a ring buffer instead?
-    unparsed_buffer: [512] u8; // @Incomplete: maybe auto-grow this buffer up to a certain size?
-    num_unparsed_bytes := 0;
 
     unsent_buffer: [] u8;
     send_offset: int;
@@ -123,16 +112,9 @@ smash_server_thread_entry_proc :: (thread: *Thread) -> s64 {
 
         num_events := poll(poll_fds.data, xx poll_fds.count, -1);
         success := true;
-        received_new_data := false;
         if poll_fds[0].revents & POLLIN {
-            bytes_read := recv(client_socket, unparsed_buffer.data + num_unparsed_bytes, xx (unparsed_buffer.count - num_unparsed_bytes), 0);
-            if bytes_read == -1 {
-                log_error("Couldn’t read from socket %: error %", client_socket, errno());
+            if !read_raw_message_data(*message_parser, client_socket) {
                 success = false;
-            } else if bytes_read > 0 {
-                // log("Received % bytes:", bytes_read);
-                num_unparsed_bytes += bytes_read;
-                received_new_data = true;
             }
         }
         if poll_fds[0].revents & POLLOUT {
@@ -172,52 +154,8 @@ smash_server_thread_entry_proc :: (thread: *Thread) -> s64 {
             }
         }
         if !success {
-            log_error("Couldn’t read events\n");
+            log_error("Couldn’t handle poll events\n");
             break;
-        }
-
-        if received_new_data {
-            while true {
-                pool: Pool;
-                if unused_pools.count {
-                    pool = pop(*unused_pools);
-                } else {
-                    set_allocators(*pool);
-                }
-
-                push_allocator(pool_allocator_proc, *pool);
-
-                data := array_view(unparsed_buffer, 0, num_unparsed_bytes);
-                message, num_bytes_parsed, success := deserialize_message(data);
-                if !success {
-                    log_error("Could not parse message (after % bytes)", num_bytes_parsed);
-                    return 1;
-                }
-
-                if message {
-                    log("Parsed message %", message.type);
-
-                    message_with_pool: Deserialized_Message;
-                    message_with_pool.message = message;
-                    message_with_pool.pool = pool;
-                    array_add(*received_messages, message_with_pool);
-
-                    num_unparsed_bytes -= num_bytes_parsed;
-                    // @Speed: use memmove, once we have it!
-                    for i: 0..num_unparsed_bytes-1 {
-                        unparsed_buffer[i] = unparsed_buffer[i + num_bytes_parsed];
-                    }
-                } else {
-                    reset(*pool);
-                    array_add(*unused_pools, pool);
-                    
-                    if num_unparsed_bytes == unparsed_buffer.count {
-                        log_error("Message is not complete, but we ran out of buffer space!");
-                        return 1;
-                    }
-                    break;
-                }
-            }
         }
 
         if target.state == .RUNNING {
@@ -296,24 +234,24 @@ smash_server_thread_entry_proc :: (thread: *Thread) -> s64 {
                 // log("Taking pending action: %\n", pending_action);
                 success, pending_action = take_action(*target, pending_action);
             } else {
-                for received_messages {
-                    if #complete it.message.type == {
+                while true {
+                    deserialized_message, success := get_next_deserialized_message(*message_parser);
+                    if !success     break;
+
+                    if #complete deserialized_message.message.type == {
                         case .INIT;
-                            message_init := cast(*Message_Init) it.message;
+                            message_init := cast(*Message_Init) deserialized_message.message;
                             log("Received init message: %", <<message_init);
                             success = handle_init_message(*state, <<message_init);
                         case .RUN;
-                            message_run := cast(*Message_Run) it.message;
+                            message_run := cast(*Message_Run) deserialized_message.message;
                             log("Received run message: %", <<message_run);
                             success = handle_run_message(*state, <<message_run);
                         case .OUTPUT;
                             assert(false);
                     }
 
-                    reset(*it.pool);
-                    array_add(*unused_pools, it.pool);
-
-                    remove it;
+                    free_deserialized_message(*message_parser, deserialized_message);
 
                     if pending_action != .NOTHING   break;
                     if target.state == .RUNNING   break;
@@ -368,7 +306,7 @@ send_entire_pipe :: (state: *Debug_State, fd: s32, type: Output_Type) -> success
 
         message: Message_Output;
         message.output_type = type;
-        message.data = buffer;
+        message.data.data = buffer.data;
         message.data.count = bytes_read;
         send_message(state, *message);
 
@@ -478,7 +416,6 @@ handle_run_message :: (using state: *Debug_State, message: Message_Run) -> bool 
 #import "Command_Line";
 #import "POSIX";
 #import "Thread";
-#import "Pool";
 
 #load "socket.jai";
 #load "logger.jai";

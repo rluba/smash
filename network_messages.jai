@@ -40,7 +40,7 @@ Message_Output :: struct {
     using base: Message;
     type = .OUTPUT;
     output_type: Output_Type;
-    data: [] u8;
+    data: string;
 }
 
 Message_Size_Type :: s64;
@@ -312,3 +312,103 @@ deserialize_struct :: (dest: *void, src: [] u8, info: *Type_Info_Struct) -> num_
 
     return offset, true;
 }
+
+
+Message_Parser :: struct {
+    // @Speed: Use a ring buffer instead?
+    unparsed_buffer: [512] u8; // @Incomplete: maybe auto-grow this buffer up to a certain size?
+    num_unparsed_bytes := 0;
+
+    unused_pools: [..] Pool;
+    received_messages: [..] Deserialized_Message;
+}
+
+Deserialized_Message :: struct {
+    pool: Pool;
+    message: *Message;
+}
+
+
+init :: (using parser: *Message_Parser) {
+    num_unparsed_bytes = 0;
+    remember_allocators(*received_messages);
+    remember_allocators(*unused_pools);
+}
+
+// socket must be non-blocking
+read_raw_message_data :: (using parser: *Message_Parser, socket: s32) -> success: bool {
+    while true {
+        bytes_read := recv(socket, unparsed_buffer.data + num_unparsed_bytes, xx (unparsed_buffer.count - num_unparsed_bytes), 0);
+        if bytes_read == -1 {
+            if errno() == EAGAIN || errno() == EWOULDBLOCK      break; // Nothing to read atm
+
+            log_error("Couldn’t read from socket %: error %", socket, errno());
+            return false;
+        }
+
+        // Probably shouldn't happen, but the doc isn't 100% clear on that.
+        if bytes_read == 0  break;
+
+        // log("Received % bytes:", bytes_read);
+        num_unparsed_bytes += bytes_read;
+
+        pool: Pool;
+        if unused_pools.count {
+            pool = pop(*unused_pools);
+        } else {
+            set_allocators(*pool);
+        }
+
+        push_allocator(pool_allocator_proc, *pool);
+
+        data := array_view(unparsed_buffer, 0, num_unparsed_bytes);
+        message, num_bytes_parsed, success := deserialize_message(data);
+        if !success {
+            log_error("Could not parse message (after % bytes)", num_bytes_parsed);
+            return false;
+        }
+
+        if message {
+            log("Parsed message %", message.type);
+
+            message_with_pool: Deserialized_Message;
+            message_with_pool.message = message;
+            message_with_pool.pool = pool;
+            array_add(*received_messages, message_with_pool);
+
+            num_unparsed_bytes -= num_bytes_parsed;
+            // @Speed: use memmove, once we have it!
+            for i: 0..num_unparsed_bytes-1 {
+                unparsed_buffer[i] = unparsed_buffer[i + num_bytes_parsed];
+            }
+        } else {
+            reset(*pool);
+            array_add(*unused_pools, pool);
+            
+            if num_unparsed_bytes == unparsed_buffer.count {
+                log_error("Message is not complete, but we ran out of buffer space!");
+                return false;
+            }
+
+            break;
+        }
+    }
+
+    return true;
+}
+
+get_next_deserialized_message :: (using parser: *Message_Parser) -> Deserialized_Message, success: bool {
+    if received_messages.count == 0     return .{}, false;
+    
+    result := pop(*received_messages);
+    return result, true;
+}
+
+free_deserialized_message :: (using parser: *Message_Parser, message: Deserialized_Message) {
+    reset(*message.pool);
+    array_add(*unused_pools, message.pool);
+}
+
+#scope_file
+
+#import "Pool";

@@ -41,7 +41,7 @@ free_command :: (command: *Network_Command) {
 }
 
 free_message :: (message: Message) {
-    // @Incomlete: We need to free each individual message type here or use a pool or whatnot
+    // @Incomplete: We need to free each individual message type here or use a pool or whatnot
 }
 
 Network_Result_Type :: enum {
@@ -86,21 +86,27 @@ try_get_next_network_result :: () -> result: Network_Result, success: bool {
 }
 
 next_command_mutex: Mutex;
-next_command_semaphore: Semaphore;
+next_command_pipes: [2] s32;
 next_command: Network_Command;
 
 network_result_mutex: Mutex;
 network_result_semaphore: Semaphore;
 network_results: [..] Network_Result;
 
-client_network_init :: () {
+client_network_init :: () -> bool {
     connection_status = .DISCONNECTED;
     init(*next_command_mutex);
-    init(*next_command_semaphore);
+    result := pipe(*next_command_pipes);
+    if result != 0 {
+        log_error("Could not create pipes: %", errno());
+        return false;
+    }
     init(*network_result_mutex);
     init(*network_result_semaphore);
     thread_init(*network_thread, network_thread_proc);
     thread_start(*network_thread);
+
+    return true;
 }
 
 client_network_connect :: (server_name: string, port: u16) {
@@ -111,7 +117,8 @@ client_network_connect :: (server_name: string, port: u16) {
     next_command.server.name = copy_string(server_name);
     next_command.server.port = port;
     connection_status = .CONNECTING;
-    signal(*next_command_semaphore);
+
+    signal_next_command();
 }
 
 client_network_send_message :: (message: *Message) {
@@ -120,28 +127,157 @@ client_network_send_message :: (message: *Message) {
     free_command(*next_command);
     next_command.type = .MESSAGE;
     next_command.message = message;
-    signal(*next_command_semaphore);
+
+    signal_next_command();
 }
+
+signal_next_command :: () {
+    b: u8;
+    result := write(next_command_pipes[1], *b, 1);
+    if result != 1 {
+        log_error("Could not signal next command: %", errno());
+    }
+}
+
 
 #scope_file
 
-network_thread_proc :: (thread: *Thread) -> s64{
+network_thread_proc :: (thread: *Thread) -> s64 {
     server_socket: s32 = -1;
+    message_parser: Message_Parser;
+    init(*message_parser);
+    
+    kevent_queue := kqueue();
+    if kevent_queue == -1 {
+        log_error("Could not create event queue: %\n", errno());
+        return -1;
+    }
+    defer {
+        result := close(kevent_queue);
+        if result == -1 {
+            log_error("Could not close event queue: %\n", errno());
+        }
+    }
+
+    events: [2] Kevent64;
+    events[0].ident = cast(u64) next_command_pipes[0];
+    events[0].filter = .READ;
+    events[0].flags = .ADD;
+    events[0].udata = null;
+
+    result := kevent64(kevent_queue, events.data, 1, null, 0, 0, null);
+    if result == -1 {
+        log_error("Could not register events with the event queue: %\n", errno());
+        return -1;
+    }
 
     while true {
-        log("Waiting for a command…");
-        wait_for(*next_command_semaphore);
-        log("Checking next command!");
+        log("Waiting for a command or network data…");
+        num_events := kevent64(kevent_queue, null, 0, events.data, events.count, 0, null);
+        if num_events == -1 {
+            log_error("Could not read events from the event queue: %\n", errno());
+            return -1;
+        }
 
-        {
-            lock(*next_command_mutex);
-            defer unlock(*next_command_mutex);
-            handle_command(next_command, *server_socket);
-            free_command(*next_command);
+        assert(num_events > 0);
+        success := true;
+        for 0..num_events-1 {
+            event := events[it];
+            log("Got event: %", event);
+            if event.filter == {
+                case .READ;
+                    if event.ident == cast(u64) next_command_pipes[0] {
+                        b: u8;
+                        result := read(next_command_pipes[0], *b, 1);
+                        if result != 1 {
+                            log_error("Could not read from next_command_pipes: %", errno());
+                            continue;
+                        }
+                        log("Checking next command!");
+
+                        {
+                            lock(*next_command_mutex);
+                            defer unlock(*next_command_mutex);
+
+                            if next_command.type == .CONNECT && server_socket != -1 {
+                                close_server_socket(*server_socket, kevent_queue);
+                            }
+
+                            handle_command(next_command, *server_socket);
+
+                            if next_command.type == .CONNECT && server_socket != -1 {
+                                event: Kevent64;
+                                event.ident = cast(u64) server_socket;
+                                event.filter = .READ;
+                                event.flags = .ADD;
+                                event.udata = null;
+
+                                result = kevent64(kevent_queue, *event, 1, null, 0, 0, null);
+                                if result != 1 {
+                                    log_error("Could not add socket to kqueue: %", errno());
+                                }
+                            }
+                            free_command(*next_command);
+                        }
+                        
+                    } else if event.ident == cast(u64) server_socket {
+                        success := read_raw_message_data(*message_parser, server_socket);
+                        if success {
+                            while true {
+                                message, success := get_next_deserialized_message(*message_parser);
+                                if !success     break;
+
+                                if #complete message.message.type == {
+                                    case .OUTPUT;
+                                        output_message := cast(*Message_Output) message.message;
+                                        log("Got message: %", <<output_message);
+
+
+                                    case .INIT; #through;
+                                    case .RUN; 
+                                        assert(false);
+                                }
+
+                                free_deserialized_message(*message_parser, message);
+                            }
+
+                            if event.flags & .EOF {
+                                add_error(copy_string("Connection closed by server"));
+                                close_server_socket(*server_socket, kevent_queue);
+                            }
+                        } else {
+                            add_error(copy_string("Could not read server message"));
+                            close_server_socket(*server_socket, kevent_queue);
+                        }
+                    }
+                case;
+                    log("Unexpected event filter: %", event);
+            }
         }
     }
 
     return 0;
+}
+
+close_server_socket :: (socket: *s32, kevent_queue: s32) -> bool {
+    if <<socket == -1   return true;
+
+    event: Kevent64;
+    event.ident = cast(u64) (<<socket);
+    event.filter = .READ;
+    event.flags = .DELETE;
+    event.udata = null;
+
+    result := kevent64(kevent_queue, *event, 1, null, 0, 0, null);
+    if result == -1 {
+        log_error("Could not remove socket from kqueue: %", errno());
+        return false;
+    }
+
+    close(<<socket);
+    <<socket = -1;
+
+    return true;
 }
 
 handle_command :: (command: Network_Command, server_socket: *s32) {
@@ -154,7 +290,7 @@ handle_command :: (command: Network_Command, server_socket: *s32) {
             <<server_socket = try_connect(server);
         case .MESSAGE;
             if <<server_socket == -1 {
-                add_error("Can’t send message while not connected");
+                add_error(copy_string("Can’t send message while not connected"));
                 return;
             }
 
@@ -219,9 +355,18 @@ try_connect :: (server: Server) -> socket: s32, success: bool{
     log("Trying to connect to %", <<address);
 
     sock := socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+
     result = connect(sock, address, address_len);
     if result == -1 {
         add_error(sprint("Could not connect to \"%:%\": error %", server.name, server.port, errno()));
+        close(sock);
+        return -1, false;
+    }
+
+    result = fcntl(sock, F_SETFL, fcntl(sock, F_GETFL) | O_NONBLOCK);
+    if result == -1 {
+        add_error(sprint("Could not set the socket to non-blocking: %", errno()));
+       close(sock);
         return -1, false;
     }
 
@@ -263,4 +408,6 @@ add_result :: (result: Network_Result) {
 #import "Thread";
 #load "socket.jai";
 #load "network_messages.jai";
+
+#import "Process"; // For kevent / kqueue, which needs a better place
 
