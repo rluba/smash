@@ -72,7 +72,7 @@ Debug_State :: struct {
     client_socket: s32;
     target: Target;
     poll_fds: [..] pollfd;
-    message_parser: Message_Parser;
+    message_parser: Message_Parser(thread_safe = false);
     messages_to_send: [..] [] u8;
     pending_action := Debugger_Action.NOTHING;
     source_display := Source_Display.DISASSEMBLY;

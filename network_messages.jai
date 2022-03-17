@@ -314,13 +314,17 @@ deserialize_struct :: (dest: *void, src: [] u8, info: *Type_Info_Struct) -> num_
 }
 
 
-Message_Parser :: struct {
+Message_Parser :: struct (thread_safe: bool) {
     // @Speed: Use a ring buffer instead?
     unparsed_buffer: [512] u8; // @Incomplete: maybe auto-grow this buffer up to a certain size?
     num_unparsed_bytes := 0;
 
-    unused_pools: [..] Pool;
     received_messages: [..] Deserialized_Message;
+    unused_pools: [..] Pool;
+
+    #if thread_safe {
+        unused_pools_mutex: Mutex;
+    }
 }
 
 Deserialized_Message :: struct {
@@ -329,14 +333,17 @@ Deserialized_Message :: struct {
 }
 
 
-init :: (using parser: *Message_Parser) {
+init :: (using parser: *$T/Message_Parser) {
     num_unparsed_bytes = 0;
     remember_allocators(*received_messages);
     remember_allocators(*unused_pools);
+    #if thread_safe {
+        init(*unused_pools_mutex);
+    }
 }
 
 // socket must be non-blocking
-read_raw_message_data :: (using parser: *Message_Parser, socket: s32) -> success: bool {
+read_raw_message_data :: (using parser: *$T/Message_Parser, socket: s32) -> success: bool {
     while true {
         bytes_read := recv(socket, unparsed_buffer.data + num_unparsed_bytes, xx (unparsed_buffer.count - num_unparsed_bytes), 0);
         if bytes_read == -1 {
@@ -346,17 +353,19 @@ read_raw_message_data :: (using parser: *Message_Parser, socket: s32) -> success
             return false;
         }
 
-        // Probably shouldn't happen, but the doc isn't 100% clear on that.
-        if bytes_read == 0  break;
+        if bytes_read == 0  break;      // Probably shouldn't happen, but the doc isn't 100% clear on that.
 
         // log("Received % bytes:", bytes_read);
         num_unparsed_bytes += bytes_read;
 
         pool: Pool;
-        if unused_pools.count {
-            pool = pop(*unused_pools);
-        } else {
-            set_allocators(*pool);
+        {
+            maybe_scope_lock_unused_pools(parser);
+            if unused_pools.count {
+                pool = pop(*unused_pools);
+            } else {
+                set_allocators(*pool);
+            }
         }
 
         push_allocator(pool_allocator_proc, *pool);
@@ -383,7 +392,10 @@ read_raw_message_data :: (using parser: *Message_Parser, socket: s32) -> success
             }
         } else {
             reset(*pool);
-            array_add(*unused_pools, pool);
+            {
+                maybe_scope_lock_unused_pools(parser);
+                array_add(*unused_pools, pool);
+            }
             
             if num_unparsed_bytes == unparsed_buffer.count {
                 log_error("Message is not complete, but we ran out of buffer space!");
@@ -397,16 +409,26 @@ read_raw_message_data :: (using parser: *Message_Parser, socket: s32) -> success
     return true;
 }
 
-get_next_deserialized_message :: (using parser: *Message_Parser) -> Deserialized_Message, success: bool {
+get_next_deserialized_message :: (using parser: *$T/Message_Parser) -> Deserialized_Message, success: bool {
     if received_messages.count == 0     return .{}, false;
     
     result := pop(*received_messages);
     return result, true;
 }
 
-free_deserialized_message :: (using parser: *Message_Parser, message: Deserialized_Message) {
+free_deserialized_message :: (using parser: *$T/Message_Parser, message: Deserialized_Message) {
     reset(*message.pool);
-    array_add(*unused_pools, message.pool);
+    {
+        maybe_scope_lock_unused_pools(parser);
+        array_add(*unused_pools, message.pool);
+    }
+}
+
+maybe_scope_lock_unused_pools :: (using parser: *$T/Message_Parser) #expand {
+    #if thread_safe {
+        lock(*unused_pools_mutex);
+        `defer unlock(*unused_pools_mutex);
+    }
 }
 
 #scope_file

@@ -66,8 +66,6 @@ free_result :: (result: Network_Result) {
         case .CONNECTED;
             free(result.server.name);
         case .MESSAGE;
-            lock(*message_parser_mutex);
-            defer unlock(*message_parser_mutex);
             free_deserialized_message(*message_parser, result.message);
     }
 }
@@ -99,8 +97,7 @@ network_result_mutex: Mutex;
 network_result_semaphore: Semaphore;
 network_results: [..] Network_Result;
 
-message_parser_mutex: Mutex;
-message_parser: Message_Parser;
+message_parser: Message_Parser(thread_safe = true);
 
 client_network_init :: () -> bool {
     connection_status = .DISCONNECTED;
@@ -113,7 +110,6 @@ client_network_init :: () -> bool {
     init(*network_result_mutex);
     init(*network_result_semaphore);
 
-    init(*message_parser_mutex);
     init(*message_parser);
 
     thread_init(*network_thread, network_thread_proc);
@@ -231,9 +227,7 @@ network_thread_proc :: (thread: *Thread) -> s64 {
                         }
                         
                     } else if event.ident == cast(u64) server_socket {
-                        lock(*message_parser_mutex);
                         success := read_raw_message_data(*message_parser, server_socket);
-                        unlock(*message_parser_mutex);
 
                         if success {
                             while true {
