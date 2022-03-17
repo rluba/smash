@@ -330,7 +330,7 @@ parse_and_connect :: (server: string) {
             set_connect_input_error("Invalid command (invalid quotes?)");
             return;
         }
-        array_add(*args, arg);
+        array_add(*args, copy_string(arg));
     }
 
     success, name_str, port_str := split_from_left(server, #char ":");
@@ -355,7 +355,7 @@ parse_and_connect :: (server: string) {
     free(pending_working_dir);
 
     pending_args = args;
-    pending_working_dir = get_result(working_dir_input);
+    pending_working_dir = copy_string(get_result(working_dir_input));
 
     client_network_connect(name_str, xx port);
 }
