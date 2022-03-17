@@ -77,7 +77,8 @@ Debug_State :: struct {
     client_socket: s32;
     target: Target;
     poll_fds: [..] pollfd;
-    pending_messages: [..] Deserialized_Message;
+    received_messages: [..] Deserialized_Message;
+    messages_to_send: [..] [] u8;
     unused_pools: [..] Pool;
     pending_action := Debugger_Action.NOTHING;
     source_display := Source_Display.DISASSEMBLY;
@@ -85,7 +86,7 @@ Debug_State :: struct {
 
 smash_server_thread_entry_proc :: (thread: *Thread) -> s64 {
     using state: Debug_State;
-    remember_allocators(*pending_messages);
+    remember_allocators(*received_messages);
     remember_allocators(*unused_pools);
 
     client_socket = cast(s32) thread.data;
@@ -102,31 +103,65 @@ smash_server_thread_entry_proc :: (thread: *Thread) -> s64 {
     unparsed_buffer: [512] u8; // @Incomplete: maybe auto-grow this buffer up to a certain size?
     num_unparsed_bytes := 0;
 
-    fd := array_add(*poll_fds);
-    fd.fd = client_socket;
-    fd.events = POLLIN;
+    unsent_buffer: [] u8;
+    send_offset: int;
+
+    server_fd := array_add(*poll_fds);
+    server_fd.fd = client_socket;
+    server_fd.events = POLLIN;
 
     while true {
+        if !unsent_buffer.count && messages_to_send.count {
+            message_buffer := pop(*messages_to_send);
+            unsent_buffer = message_buffer;
+        }
+        if send_offset < unsent_buffer.count {
+            server_fd.events = POLLIN | POLLOUT;
+        } else {
+            server_fd.events = POLLIN;
+        }
+
         num_events := poll(poll_fds.data, xx poll_fds.count, -1);
         success := true;
         received_new_data := false;
         if poll_fds[0].revents & POLLIN {
-            result := recv(client_socket, unparsed_buffer.data + num_unparsed_bytes, xx (unparsed_buffer.count - num_unparsed_bytes), 0);
-            if result == -1 {
+            bytes_read := recv(client_socket, unparsed_buffer.data + num_unparsed_bytes, xx (unparsed_buffer.count - num_unparsed_bytes), 0);
+            if bytes_read == -1 {
                 log_error("Couldn’t read from socket %: error %", client_socket, errno());
                 success = false;
-            } else if result > 0 {
-                log("Received % bytes:", result);
-                num_unparsed_bytes += result;
+            } else if bytes_read > 0 {
+                // log("Received % bytes:", bytes_read);
+                num_unparsed_bytes += bytes_read;
                 received_new_data = true;
+            }
+        }
+        if poll_fds[0].revents & POLLOUT {
+            assert(send_offset < unsent_buffer.count);
+            flags: s32 = 0;
+            #if OS == .LINUX {
+                flags |= MSG_NOSIGNAL;
+            }
+            // @Speed: We send at most one message per iteration here!
+            // Instead we could loop until we can’t write more or have nothing to say…
+            bytes_sent := send(client_socket, unsent_buffer.data + send_offset, xx (unsent_buffer.count - send_offset), flags);
+            if bytes_sent == -1 {
+                log_error("Couldn’t write to socket %: error %", client_socket, errno());
+                success = false;
+            } else if bytes_sent > 0 {
+                log("Sent % bytes:", bytes_sent);
+                send_offset += bytes_sent;
+                if send_offset == unsent_buffer.count {
+                    array_reset(*unsent_buffer);
+                    send_offset = 0;
+                }
             }
         }
         if poll_fds.count > 1 {
             if poll_fds[1].revents & POLLIN {
-                success = print_entire_pipe(target.output_pipe);
+                success = send_entire_pipe(*state, target.output_pipe, .STDOUT);
             }
             if poll_fds[2].revents & POLLIN {
-                success = print_entire_pipe(target.error_pipe) && success;
+                success = send_entire_pipe(*state, target.error_pipe, .STDERR) && success;
             }
             if poll_fds[3].revents & POLLIN {
                 num_exp: u64;
@@ -165,7 +200,7 @@ smash_server_thread_entry_proc :: (thread: *Thread) -> s64 {
                     message_with_pool: Deserialized_Message;
                     message_with_pool.message = message;
                     message_with_pool.pool = pool;
-                    array_add(*pending_messages, message_with_pool);
+                    array_add(*received_messages, message_with_pool);
 
                     num_unparsed_bytes -= num_bytes_parsed;
                     // @Speed: use memmove, once we have it!
@@ -261,7 +296,7 @@ smash_server_thread_entry_proc :: (thread: *Thread) -> s64 {
                 // log("Taking pending action: %\n", pending_action);
                 success, pending_action = take_action(*target, pending_action);
             } else {
-                for pending_messages {
+                for received_messages {
                     if #complete it.message.type == {
                         case .INIT;
                             message_init := cast(*Message_Init) it.message;
@@ -271,6 +306,8 @@ smash_server_thread_entry_proc :: (thread: *Thread) -> s64 {
                             message_run := cast(*Message_Run) it.message;
                             log("Received run message: %", <<message_run);
                             success = handle_run_message(*state, <<message_run);
+                        case .OUTPUT;
+                            assert(false);
                     }
 
                     reset(*it.pool);
@@ -312,6 +349,39 @@ free_target :: (target: *Target) {
         target.pid = -1;
     }
     // @Incomplete: Moar cleanup
+}
+
+// @Speed: We chop things up in to too many messages here.
+send_entire_pipe :: (state: *Debug_State, fd: s32, type: Output_Type) -> success: bool {
+    buffer: [2048] u8;
+    while true {
+        bytes_read := read(fd, buffer.data, buffer.count);
+        if bytes_read == 0  return true;
+        if bytes_read < 0 {
+            read_error := errno();
+            if read_error == EAGAIN || read_error == EWOULDBLOCK {
+                // @Incomplete: Also ignore EINTR?
+                break;
+            }
+            return false;
+        }
+
+        message: Message_Output;
+        message.output_type = type;
+        message.data = buffer;
+        message.data.count = bytes_read;
+        send_message(state, *message);
+
+        // buffer_str := to_string(buffer.data, bytes_read);
+        // print("%", buffer_str);
+    }
+
+    return true;
+}
+
+send_message :: (using state: *Debug_State, message: *Message) {
+    data := serialize_message(message);
+    array_add(*messages_to_send, data);
 }
 
 handle_init_message :: (using state: *Debug_State, message: Message_Init) -> success: bool {

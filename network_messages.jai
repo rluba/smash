@@ -1,6 +1,10 @@
 Message_Type :: enum u32 {
+    // client -> server
     INIT;
     RUN;
+
+    // server -> client
+    OUTPUT;
 }
 
 Message :: struct {
@@ -26,16 +30,32 @@ Message_Run :: struct {
     run_type: Run_Type;
 }
 
+
+Output_Type :: enum u8 {
+    STDOUT;
+    STDERR;
+}
+
+Message_Output :: struct {
+    using base: Message;
+    type = .OUTPUT;
+    output_type: Output_Type;
+    data: [] u8;
+}
+
 Message_Size_Type :: s64;
 
 serialize_message :: (message: *Message) -> [] u8 {
     if #complete message.type == {
         case .INIT;
-            init_message := cast(*Message_Init) message;
-            return serialize_concrete_message(<<init_message);
+            m := cast(*Message_Init) message;
+            return serialize_concrete_message(<<m);
         case .RUN;
-            run_message := cast(*Message_Run) message;
-            return serialize_concrete_message(<<run_message);
+            m := cast(*Message_Run) message;
+            return serialize_concrete_message(<<m);
+        case .OUTPUT;
+            m := cast(*Message_Output) message;
+            return serialize_concrete_message(<<m);
     }
 }
 
@@ -191,6 +211,9 @@ deserialize_message :: (data: [] u8) -> *Message, num_bytes_read: s64, success: 
             return message, num_bytes_read + size_of(Message_Size_Type), success;
         case .RUN;
             message, num_bytes_read, success := deserialize_concrete_message(data_without_size, Message_Run);
+            return message, num_bytes_read + size_of(Message_Size_Type), success;
+        case .OUTPUT;
+            message, num_bytes_read, success := deserialize_concrete_message(data_without_size, Message_Output);
             return message, num_bytes_read + size_of(Message_Size_Type), success;
     }
 }

@@ -33,11 +33,15 @@ free_command :: (command: *Network_Command) {
         case .CONNECT;
             free(command.server.name);
         case .MESSAGE;
-            // @Incomlete: We need to free each individual message type here or use a pool or whatnot
+            free_message(<<command.message);
             free(command.message);
     }
 
     command.type = .NONE;
+}
+
+free_message :: (message: Message) {
+    // @Incomlete: We need to free each individual message type here or use a pool or whatnot
 }
 
 Network_Result_Type :: enum {
@@ -163,7 +167,7 @@ handle_command :: (command: Network_Command, server_socket: *s32) {
                 #if OS == .LINUX {
                     flags |= MSG_NOSIGNAL;
                 }
-                bytes_sent := send(<<server_socket, buffer.data + total_sent, xx (buffer.count - total_sent), 0);
+                bytes_sent := send(<<server_socket, buffer.data + total_sent, xx (buffer.count - total_sent), flags);
                 if bytes_sent == -1 {
                     error := errno();
                     if error == EPIPE {

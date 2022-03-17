@@ -131,17 +131,6 @@ take_action :: (using target: *Target, action: Debugger_Action) -> success: bool
     return true, pending_action;
 }
 
-print_target_output :: (using target: *Target) -> success: bool {
-    success := print_entire_pipe(output_pipe);
-    success &&= print_entire_pipe(error_pipe);
-    if !success {
-        log_error("Couldn’t read output\n");
-        return false;
-    }
-
-    return true;
-}
-
 fetch_registers :: (using target: *Target) -> success: bool {
     result := ptrace(.GETREGS, pid, null, *target.registers);
     if result != 0 {
@@ -399,27 +388,6 @@ spawn_target_process :: (cmd: [] string, working_directory: string) -> success: 
 
         return true, pid, output_pipes[0], error_pipes[0];
     }
-}
-
-print_entire_pipe :: (fd: s32) -> success: bool {
-    buffer: [2048] u8;
-    while true {
-        bytes_read := read(fd, buffer.data, buffer.count);
-        if bytes_read == 0  return true;
-        if bytes_read < 0 {
-            read_error := errno();
-            if read_error == EAGAIN || read_error == EWOULDBLOCK {
-                // @Incomplete: Also ignore EINTR?
-                break;
-            }
-            return false;
-        }
-
-        buffer_str := to_string(buffer.data, bytes_read);
-        print("%", buffer_str);
-    }
-
-    return true;
 }
 
 get_input :: (buffer: [] u8) -> success: bool, num_read: int {

@@ -231,7 +231,6 @@ Ptrace_Request :: __ptrace_request;
         gs:       u64;
     }
 
-    __pid_t :: s32;
     __uid_t :: u32;
     __clock_t :: s64;
 

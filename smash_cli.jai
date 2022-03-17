@@ -308,6 +308,28 @@ do_main :: () -> s32 {
 
 #scope_file
 
+print_entire_pipe :: (fd: s32) -> success: bool {
+    buffer: [2048] u8;
+    while true {
+        bytes_read := read(fd, buffer.data, buffer.count);
+        if bytes_read == 0  return true;
+        if bytes_read < 0 {
+            read_error := errno();
+            if read_error == EAGAIN || read_error == EWOULDBLOCK {
+                // @Incomplete: Also ignore EINTR?
+                break;
+            }
+            return false;
+        }
+
+        buffer_str := to_string(buffer.data, bytes_read);
+        print("%", buffer_str);
+    }
+
+    return true;
+}
+
+
 #load "target.jai";
 #load "logger.jai";
 #load "termios.jai";

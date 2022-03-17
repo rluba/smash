@@ -23,6 +23,9 @@ pending_working_dir: string;
 log_messages: [..] string;
 log_scroll_value: float;
 
+output_lines: [..] string;
+output_scroll_value: float;
+
 main :: () {
     #if OS == .WINDOWS {
         Windows :: #import "Windows";
@@ -47,7 +50,9 @@ main :: () {
     my_init_fonts_and_themes();
     ui_init();
 
-    set_text(*server_input.input, "localhost:8377");
+    set_text(*server_input, "spieltier-linux.local:8377");
+    set_text(*command_input, "./tracee");
+    set_text(*working_dir_input, "/home/raphael/speckflunder/jai/smash");
 
     // @ToDo: Recent servers
     // set_auto_complete(*input_teas.input, auto_complete_teas, null);
@@ -89,7 +94,7 @@ main :: () {
             }
         }
 
-        draw_one_frame(dt);
+        update(dt);
         
         reset_temporary_storage();
         sleep_milliseconds(10);
@@ -98,7 +103,7 @@ main :: () {
 
 background_color: Vector3 = .{.157, .157, .157};
 
-draw_one_frame :: (dt: float) {
+update :: (dt: float) {
     // Simp.update_window(my_window);
     Simp.clear_render_target(background_color.x, background_color.y, background_color.z, 1);
 
@@ -215,6 +220,30 @@ draw_one_frame :: (dt: float) {
         }
         
  	    end_scrollable_region(region, s.x + s.w, s.y, *log_scroll_value);
+    }
+    {
+ 	    theme := default_overall_theme.scrollable_region_theme;
+ 	    theme.region_background.shape.rounding_flags = 0;
+ 	    
+        r.y += r.h;
+        r.h = 3*k;
+ 	    
+ 	    region, inside := begin_scrollable_region(r, *theme);
+ 	    
+ 	    label_height := button_font.character_height * 1.1;
+ 	    s := inside;
+ 	    s.y = s.y + s.h - label_height;
+ 	    s.h = label_height;
+ 	    s.y += log_scroll_value;
+ 	    
+        log_theme := status_theme;
+
+        for output_lines {
+            label(s, it, *log_theme);
+            s.y -= floor(label_height * 1.1 + 0.5);
+        }
+        
+ 	    end_scrollable_region(region, s.x + s.w, s.y, *output_scroll_value);
     }
 
     
