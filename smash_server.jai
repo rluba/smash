@@ -130,7 +130,7 @@ smash_server_thread_entry_proc :: (thread: *Thread) -> s64 {
                 log_error("Couldn’t write to socket %: error %", client_socket, errno());
                 success = false;
             } else if bytes_sent > 0 {
-                log("Sent % bytes:", bytes_sent);
+                log("Sent % bytes", bytes_sent);
                 send_offset += bytes_sent;
                 if send_offset == unsent_buffer.count {
                     array_reset(*unsent_buffer);
@@ -203,9 +203,8 @@ smash_server_thread_entry_proc :: (thread: *Thread) -> s64 {
                     if WIFEXITED(status) {
                         target_exit_code := cast(s32) WEXITSTATUS(status);
                         log("Target has exited with code %\n", target_exit_code);
-                        break;
-                    }
-                    if WIFSIGNALED(status) {
+                        target.state = .EXITED;
+                    } else if WIFSIGNALED(status) {
                         signal := WTERMSIG(status);
                         signal_string := to_string(strsignal(signal));
                         log_error("Target was terminated by signal % (%).\n", signal, signal_string);
@@ -219,10 +218,11 @@ smash_server_thread_entry_proc :: (thread: *Thread) -> s64 {
                         if !fetch_registers(*target)   return 1;
                         print_registers(*target);
                         
-                        break;
+                        target.state = .EXITED;
+                    } else {
+                        log_error("Something unexpected happened in the target process: %\n", status);
+                        return 1;
                     }
-                    log_error("Something unexpected happened in the target process: %\n", status);
-                    return 1;
                 }
             }
         }

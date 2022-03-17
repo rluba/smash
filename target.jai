@@ -27,6 +27,7 @@ Target_State :: enum {
     RUNNING;
     PAUSED;
     HIT_BREAKPOINT;
+    EXITED;
 }
 
 Breakpoint :: struct {
@@ -106,6 +107,11 @@ Debugger_Action :: enum {
 }
 
 take_action :: (using target: *Target, action: Debugger_Action) -> success: bool, pending_action: Debugger_Action {
+    if target.state == .EXITED {
+        log_error("Ignoring action % because the target has already exited", action);
+        return true, .NOTHING;
+    }
+
     pending_action := Debugger_Action.NOTHING;
     if action == {
         case .STEP;
