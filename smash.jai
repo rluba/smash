@@ -24,7 +24,32 @@ log_messages: [..] string;
 log_scroll_value: float;
 
 output_lines: [..] string;
+last_output_line_incomplete: bool;
 output_scroll_value: float;
+
+append_output :: (data: string, type: Output_Type) {
+    // @ToDo: handle type!
+
+    remainder := data;
+    incomplete := false;
+    while remainder {
+        found: bool;
+        next_line: string;
+        found, next_line, remainder = split_from_left(remainder, #char "\n");
+        if last_output_line_incomplete {
+            last_line := pop(*output_lines);
+            defer free(last_line);
+            next_line = join(last_line, next_line);
+        } else {
+            next_line = copy_string(next_line);
+        }
+
+        array_add(*output_lines, next_line);
+
+        last_output_line_incomplete = !found;
+    }
+}
+
 
 main :: () {
     #if OS == .WINDOWS {
@@ -113,7 +138,7 @@ update :: (dt: float) {
     while true {
         network_result, success := try_get_next_network_result();
         if !success break;
-        // @ToDo: Use details!
+
         if network_result.type == {
             case .ERROR;
                 connection_status = .DISCONNECTED;
@@ -130,6 +155,18 @@ update :: (dt: float) {
                     array_add(*message.args, copy_string(it));
                 }
                 client_network_send_message(message);
+            case .MESSAGE;
+                message := network_result.message.message;
+                if #complete message.type == {
+                    case .OUTPUT;
+                        output_message := cast(*Message_Output) message;
+                        // log("Got message: %", <<output_message);
+                        append_output(output_message.data, output_message.output_type);
+
+                    case .INIT; #through;
+                    case .RUN; 
+                        assert(false);
+                }
         }
         free_result(network_result);
     }

@@ -47,6 +47,7 @@ free_message :: (message: Message) {
 Network_Result_Type :: enum {
     ERROR;
     CONNECTED;
+    MESSAGE;
 }
 
 Network_Result :: struct {
@@ -54,6 +55,7 @@ Network_Result :: struct {
     union {
         error: string;
         server: Server;
+        message: Deserialized_Message;
     }
 }
 
@@ -63,6 +65,10 @@ free_result :: (result: Network_Result) {
             free(result.error);
         case .CONNECTED;
             free(result.server.name);
+        case .MESSAGE;
+            lock(*message_parser_mutex);
+            defer unlock(*message_parser_mutex);
+            free_deserialized_message(*message_parser, result.message);
     }
 }
 
@@ -93,6 +99,9 @@ network_result_mutex: Mutex;
 network_result_semaphore: Semaphore;
 network_results: [..] Network_Result;
 
+message_parser_mutex: Mutex;
+message_parser: Message_Parser;
+
 client_network_init :: () -> bool {
     connection_status = .DISCONNECTED;
     init(*next_command_mutex);
@@ -103,6 +112,10 @@ client_network_init :: () -> bool {
     }
     init(*network_result_mutex);
     init(*network_result_semaphore);
+
+    init(*message_parser_mutex);
+    init(*message_parser);
+
     thread_init(*network_thread, network_thread_proc);
     thread_start(*network_thread);
 
@@ -139,13 +152,10 @@ signal_next_command :: () {
     }
 }
 
-
 #scope_file
 
 network_thread_proc :: (thread: *Thread) -> s64 {
     server_socket: s32 = -1;
-    message_parser: Message_Parser;
-    init(*message_parser);
     
     kevent_queue := kqueue();
     if kevent_queue == -1 {
@@ -221,24 +231,19 @@ network_thread_proc :: (thread: *Thread) -> s64 {
                         }
                         
                     } else if event.ident == cast(u64) server_socket {
+                        lock(*message_parser_mutex);
                         success := read_raw_message_data(*message_parser, server_socket);
+                        unlock(*message_parser_mutex);
+
                         if success {
                             while true {
                                 message, success := get_next_deserialized_message(*message_parser);
                                 if !success     break;
 
-                                if #complete message.message.type == {
-                                    case .OUTPUT;
-                                        output_message := cast(*Message_Output) message.message;
-                                        log("Got message: %", <<output_message);
-
-
-                                    case .INIT; #through;
-                                    case .RUN; 
-                                        assert(false);
-                                }
-
-                                free_deserialized_message(*message_parser, message);
+                                result: Network_Result;
+                                result.type = .MESSAGE;
+                                result.message = message;
+                                add_result(result);
                             }
 
                             if event.flags & .EOF {
